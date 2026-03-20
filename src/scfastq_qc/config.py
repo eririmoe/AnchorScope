@@ -36,7 +36,7 @@ class AppConfig:
 
 
 def load_config(path: str | Path) -> AppConfig:
-    raw: dict[str, Any] = json.loads(Path(path).read_text())
+    raw: dict[str, Any] = json.loads(Path(path).read_text(encoding="utf-8"))
     anchors = [AnchorConfig(**anchor) for anchor in raw.get("anchors", [])]
     structure = StructureConfig(**raw.get("structure", {}))
     thresholds = ThresholdConfig(**raw.get("thresholds", {}))

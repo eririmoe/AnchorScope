@@ -94,24 +94,22 @@ def get_rust_anchor_engine() -> RustAnchorEngine | None:
     if _RUST_ENGINE is not None:
         return _RUST_ENGINE
     repo_root = Path(__file__).resolve().parents[2]
-    library_path = _find_rust_library(repo_root)
-    if library_path is not None:
-        _RUST_ENGINE = RustAnchorEngine(library_path)
-        return _RUST_ENGINE
-    if _RUST_BUILD_ATTEMPTED:
-        return None
     with _RUST_ENGINE_LOCK:
         if _RUST_ENGINE is not None:
             return _RUST_ENGINE
-        if _RUST_BUILD_ATTEMPTED:
+        library_path = _find_rust_library(repo_root)
+        if library_path is None and not _RUST_BUILD_ATTEMPTED:
+            _RUST_BUILD_ATTEMPTED = True
+            _try_build_rust_library(repo_root)
+            library_path = _find_rust_library(repo_root)
+        if library_path is None:
             return None
-        _RUST_BUILD_ATTEMPTED = True
-        _try_build_rust_library(repo_root)
-    library_path = _find_rust_library(repo_root)
-    if library_path is not None:
-        _RUST_ENGINE = RustAnchorEngine(library_path)
+        try:
+            _RUST_ENGINE = RustAnchorEngine(library_path)
+        except Exception:
+            _RUST_BUILD_ATTEMPTED = True
+            return None
         return _RUST_ENGINE
-    return None
 
 
 def _validated_max_mismatches(anchor: AnchorConfig) -> int:

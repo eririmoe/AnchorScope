@@ -63,6 +63,27 @@ class SmokeTest(unittest.TestCase):
         self.assertEqual(reads[0].sequence, 'ACGT')
         self.assertEqual(reads[0].quality, '!!!!')
 
+    def test_get_rust_anchor_engine_skips_rebuild_but_loads_existing_library(self):
+        fake_engine = object()
+        with mock.patch.object(anchors_module, '_RUST_ENGINE', None), \
+             mock.patch.object(anchors_module, '_RUST_BUILD_ATTEMPTED', True), \
+             mock.patch.object(anchors_module, '_find_rust_library', return_value=Path('/tmp/libscfastq_qc_rs.so')), \
+             mock.patch.object(anchors_module, 'RustAnchorEngine', return_value=fake_engine) as engine_cls:
+            engine = anchors_module.get_rust_anchor_engine()
+        self.assertIs(engine, fake_engine)
+        engine_cls.assert_called_once_with(Path('/tmp/libscfastq_qc_rs.so'))
+
+    def test_get_rust_anchor_engine_falls_back_when_library_load_fails(self):
+        with mock.patch.object(anchors_module, '_RUST_ENGINE', None), \
+             mock.patch.object(anchors_module, '_RUST_BUILD_ATTEMPTED', False), \
+             mock.patch.object(anchors_module, '_find_rust_library', return_value=Path('/tmp/libscfastq_qc_rs.so')), \
+             mock.patch.object(anchors_module, '_try_build_rust_library') as build_lib, \
+             mock.patch.object(anchors_module, 'RustAnchorEngine', side_effect=OSError('bad library')):
+            engine = anchors_module.get_rust_anchor_engine()
+            self.assertTrue(anchors_module._RUST_BUILD_ATTEMPTED)
+        self.assertIsNone(engine)
+        build_lib.assert_not_called()
+
     def test_get_rust_anchor_engine_caches_loaded_engine(self):
         fake_engine = object()
         with mock.patch.object(anchors_module, '_RUST_ENGINE', None), \

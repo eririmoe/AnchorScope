@@ -30,6 +30,7 @@ class PreparedAnchor:
 
 _RUST_ENGINE_LOCK = Lock()
 _RUST_BUILD_ATTEMPTED = False
+_RUST_ENGINE: RustAnchorEngine | None = None
 
 
 class RustAnchorEngine:
@@ -89,22 +90,37 @@ def _try_build_rust_library(repo_root: Path) -> None:
 
 
 def get_rust_anchor_engine() -> RustAnchorEngine | None:
-    global _RUST_BUILD_ATTEMPTED
+    global _RUST_BUILD_ATTEMPTED, _RUST_ENGINE
+    if _RUST_ENGINE is not None:
+        return _RUST_ENGINE
     repo_root = Path(__file__).resolve().parents[2]
     library_path = _find_rust_library(repo_root)
     if library_path is not None:
-        return RustAnchorEngine(library_path)
+        _RUST_ENGINE = RustAnchorEngine(library_path)
+        return _RUST_ENGINE
     if _RUST_BUILD_ATTEMPTED:
         return None
     with _RUST_ENGINE_LOCK:
+        if _RUST_ENGINE is not None:
+            return _RUST_ENGINE
         if _RUST_BUILD_ATTEMPTED:
             return None
         _RUST_BUILD_ATTEMPTED = True
         _try_build_rust_library(repo_root)
     library_path = _find_rust_library(repo_root)
     if library_path is not None:
-        return RustAnchorEngine(library_path)
+        _RUST_ENGINE = RustAnchorEngine(library_path)
+        return _RUST_ENGINE
     return None
+
+
+def _validated_max_mismatches(anchor: AnchorConfig) -> int:
+    value = anchor.max_mismatches
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"Anchor '{anchor.name}' max_mismatches must be an integer")
+    if value < 0:
+        raise ValueError(f"Anchor '{anchor.name}' max_mismatches must be non-negative")
+    return value
 
 
 def _split_segments(motif: str, max_mismatches: int) -> tuple[tuple[int, str], ...]:
@@ -126,17 +142,20 @@ def prepare_anchors(anchors: list[AnchorConfig]) -> list[PreparedAnchor]:
     prepared: list[PreparedAnchor] = []
     for anchor in anchors:
         if anchor.type == "fixed":
-            assert anchor.sequence is not None
+            if not anchor.sequence:
+                raise ValueError(f"Fixed anchor '{anchor.name}' requires a non-empty sequence")
+            max_mismatches = _validated_max_mismatches(anchor)
             motif = anchor.sequence.upper()
             prepared.append(
                 PreparedAnchor(
                     config=anchor,
                     sequence=motif,
-                    segments=_split_segments(motif, anchor.max_mismatches),
+                    segments=_split_segments(motif, max_mismatches),
                 )
             )
         elif anchor.type == "regex":
-            assert anchor.pattern is not None
+            if not anchor.pattern:
+                raise ValueError(f"Regex anchor '{anchor.name}' requires a non-empty pattern")
             prepared.append(
                 PreparedAnchor(
                     config=anchor,
@@ -206,6 +225,8 @@ def _python_find_approximate_hits(sequence: str, anchor_name: str, motif: str, m
 
 
 def _rust_find_fixed_hits(sequence: str, anchor_name: str, motif: str, max_mismatches: int) -> list[AnchorHit] | None:
+    if max_mismatches < 0:
+        raise ValueError(f"Anchor '{anchor_name}' max_mismatches must be non-negative")
     engine = get_rust_anchor_engine()
     if engine is None:
         return None
@@ -225,7 +246,8 @@ def _rust_find_fixed_hits(sequence: str, anchor_name: str, motif: str, max_misma
 
 
 def find_fixed_hits(sequence: str, anchor: PreparedAnchor) -> list[AnchorHit]:
-    assert anchor.sequence is not None
+    if anchor.sequence is None:
+        raise ValueError(f"Fixed anchor '{anchor.config.name}' is missing prepared sequence")
     motif = anchor.sequence
     if not motif or len(sequence) < len(motif):
         return []
@@ -238,7 +260,8 @@ def find_fixed_hits(sequence: str, anchor: PreparedAnchor) -> list[AnchorHit]:
 
 
 def find_regex_hits(sequence: str, anchor: PreparedAnchor) -> list[AnchorHit]:
-    assert anchor.pattern is not None
+    if anchor.pattern is None:
+        raise ValueError(f"Regex anchor '{anchor.config.name}' is missing compiled pattern")
     hits: list[AnchorHit] = []
     for match in anchor.pattern.finditer(sequence):
         hits.append(

@@ -94,7 +94,10 @@ pub extern "C" fn scfastq_find_fixed_hits(
         find_approximate_hits(&sequence, &motif, max_mismatches)
     };
 
-    CString::new(result).unwrap().into_raw()
+    match CString::new(result) {
+        Ok(c_string) => c_string.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
 }
 
 #[no_mangle]

@@ -36,9 +36,9 @@ def read_fastq(path: str | Path) -> Iterator[FastqRead]:
             header = handle.readline()
             if not header:
                 break
-            sequence = handle.readline().rstrip("\n")
+            sequence = handle.readline().rstrip("\r\n")
             plus = handle.readline()
-            quality = handle.readline().rstrip("\n")
+            quality = handle.readline().rstrip("\r\n")
             if not plus.startswith("+"):
                 raise ValueError(f"Malformed FASTQ record for {header.strip()}")
             yield FastqRead(name=header.strip()[1:], sequence=sequence, quality=quality)

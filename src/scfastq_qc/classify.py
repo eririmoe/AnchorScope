@@ -10,6 +10,7 @@ class ReadStructure:
     label: str
     order_valid: bool
     detected_anchors: list[str]
+    is_reversed: bool = False
 
 
 def classify_structure(hits: list[AnchorHit], expected_order: list[str]) -> ReadStructure:
@@ -43,3 +44,34 @@ def classify_structure(hits: list[AnchorHit], expected_order: list[str]) -> Read
         return ReadStructure(label="missing_3p_anchor", order_valid=False, detected_anchors=unique_in_order)
 
     return ReadStructure(label="partial_structure", order_valid=False, detected_anchors=unique_in_order)
+
+
+def _structure_score(structure: ReadStructure, hits: list[AnchorHit]) -> tuple[int, int, int, int, int]:
+    label_priority = {
+        "full_structure": 6,
+        "anchors_detected": 5,
+        "anchor_order_invalid": 4,
+        "partial_structure": 3,
+        "missing_5p_anchor": 2,
+        "missing_3p_anchor": 2,
+        "duplicated_anchor": 1,
+        "no_anchor_detected": 0,
+    }
+    return (
+        1 if structure.order_valid else 0,
+        label_priority.get(structure.label, 0),
+        len(structure.detected_anchors),
+        len(hits),
+        -sum(hit.mismatches for hit in hits),
+    )
+
+
+def classify_best_orientation(
+    forward_hits: list[AnchorHit], reverse_hits: list[AnchorHit], expected_order: list[str]
+) -> tuple[ReadStructure, list[AnchorHit]]:
+    forward = classify_structure(forward_hits, expected_order)
+    reverse = classify_structure(reverse_hits, expected_order)
+    reverse.is_reversed = True
+    if _structure_score(reverse, reverse_hits) > _structure_score(forward, forward_hits):
+        return reverse, reverse_hits
+    return forward, forward_hits

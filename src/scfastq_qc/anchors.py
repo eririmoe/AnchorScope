@@ -31,6 +31,7 @@ class PreparedAnchor:
 _RUST_ENGINE_LOCK = Lock()
 _RUST_BUILD_ATTEMPTED = False
 _RUST_ENGINE: RustAnchorEngine | None = None
+_RC_TRANSLATION = str.maketrans("ACGTNacgtn", "TGCANtgcan")
 
 
 class RustAnchorEngine:
@@ -163,6 +164,10 @@ def prepare_anchors(anchors: list[AnchorConfig]) -> list[PreparedAnchor]:
         else:
             raise ValueError(f"Unsupported anchor type: {anchor.type}")
     return prepared
+
+
+def reverse_complement(sequence: str) -> str:
+    return sequence.translate(_RC_TRANSLATION)[::-1]
 
 
 def _hamming_distance_bounded(left: str, right: str, max_mismatches: int) -> int | None:

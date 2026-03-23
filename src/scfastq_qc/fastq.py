@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gzip
 from dataclasses import dataclass
+from math import log10
 from pathlib import Path
 from typing import Iterator
 
@@ -17,10 +18,19 @@ class FastqRead:
         return len(self.sequence)
 
     @property
-    def mean_q(self) -> float:
+    def read_qscore(self) -> float:
         if not self.quality:
             return 0.0
-        return sum(ord(ch) - 33 for ch in self.quality) / len(self.quality)
+        mean_error_rate = sum(10 ** (-(ord(ch) - 33) / 10) for ch in self.quality) / len(self.quality)
+        if mean_error_rate <= 0:
+            return 0.0
+        return -10 * log10(mean_error_rate)
+
+    @property
+    def mean_q(self) -> float:
+        # Backward-compatible alias. This now returns read-level Qscore, not
+        # the arithmetic mean of per-base Phred scores.
+        return self.read_qscore
 
 
 def open_text(path: str | Path):

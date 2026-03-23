@@ -6,9 +6,10 @@ A structure-aware FASTQ QC tool for single-cell long-read libraries.
 
 - Total reads / total bases / mean / median / N50 read length
 - Read length histogram and cumulative curve
-- Per-read mean Q distribution and length-vs-Q plot
+- Per-read Qscore distribution and length-vs-Qscore plot
 - Configurable anchor detection using fixed sequences or regex patterns
 - Anchor order validation and read structure classification
+- Automatic forward / reverse-complement structure classification with reversed-read reporting
 - HTML report with figures and summary tables
 - Optional Rust accelerator for fixed-anchor scans with automatic Python fallback
 
@@ -103,8 +104,20 @@ A left-to-right list of anchor names. Reads are classified against this expected
 Threshold settings control how the QC summary is interpreted.
 
 - `long_read_min_bp`: minimum read length used in the long/high-quality ratio. Default: `1000`.
-- `long_read_min_q`: minimum mean quality used in the long/high-quality ratio. Default: `10.0`.
+- `long_read_min_q`: minimum read Qscore used in the long/high-quality ratio. Default: `10.0`.
 - `heatmap_max_reads`: maximum reads rendered in the heatmap. Default: `200`.
+
+### Quality metric definition
+
+Quality strings are decoded as standard FASTQ `Phred+33`.
+
+Per-read quality statistics use read-level Qscore rather than the arithmetic mean of per-base Phred values:
+
+1. Convert each base quality to error probability with `10^(-Q/10)`.
+2. Average the per-base error probabilities across the read.
+3. Convert the mean error rate back to a read Qscore with `-10 * log10(mean_error_rate)`.
+
+This definition is typically more conservative than averaging per-base Phred scores directly, so existing `long_read_min_q` thresholds may need to be re-tuned after upgrading.
 
 See `examples/config.json` for a minimal working example.
 
@@ -191,8 +204,8 @@ The report currently includes:
 
 - total reads, total bases, mean/median read length, and N50
 - read length histogram and cumulative distribution
-- mean read quality distribution and length-vs-quality scatter plot
-- anchor detection ratios and structure classification counts
+- read Qscore distribution and length-vs-Qscore scatter plot
+- anchor detection ratios and structure classification counts, including forward vs reversed orientation
 - anchor occupancy heatmap across normalized read positions
 
 ## Build Rust accelerator

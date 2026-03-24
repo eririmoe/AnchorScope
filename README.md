@@ -6,7 +6,7 @@ A structure-aware FASTQ QC tool for single-cell long-read libraries.
 
 - Total reads / total bases / mean / median / N50 read length
 - Read length histogram and cumulative curve
-- Per-read Qscore distribution and length-vs-Qscore plot
+- Per-base quality score density plot and length-vs-read-Qscore plot
 - Configurable anchor detection using fixed sequences or regex patterns
 - Anchor order validation and read structure classification
 - Automatic forward / reverse-complement structure classification with reversed-read reporting
@@ -204,7 +204,7 @@ The report currently includes:
 
 - total reads, total bases, mean/median read length, and N50
 - read length histogram and cumulative distribution
-- read Qscore distribution and length-vs-Qscore scatter plot
+- per-base quality score density plot and length-vs-read-Qscore scatter plot
 - anchor detection ratios and structure classification counts, including forward vs reversed orientation
 - anchor occupancy heatmap across normalized read positions
 

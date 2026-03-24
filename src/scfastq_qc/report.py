@@ -4,6 +4,7 @@ import json
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from html import escape
+from math import ceil, exp, floor
 from pathlib import Path
 from statistics import median
 from typing import Any, Callable
@@ -220,6 +221,85 @@ def _histogram(values: list[float], title: str, xlabel: str, bins: int = 20, col
         parts.append(f"<rect x='{x:.2f}' y='{y:.2f}' width='{max(bar_w-1,1):.2f}' height='{bar_h:.2f}' fill='{color}'/>")
     parts.append(f"<text x='{width/2:.0f}' y='{height-15}' text-anchor='middle'>{escape(xlabel)}</text>")
     parts.append(f"<text x='20' y='{height/2:.0f}' transform='rotate(-90 20,{height/2:.0f})' text-anchor='middle'>Count</text>")
+    return _svg_wrapper(title, ''.join(parts), width, height)
+
+
+def _density_plot(
+    values: list[float],
+    title: str,
+    xlabel: str,
+    color: str = "#54A24B",
+    bin_width: float = 0.2,
+    smoothing_sigma: float = 0.8,
+) -> str:
+    width, height = 800, 400
+    left, right, top, bottom = 70, 30, 60, 60
+    plot_w, plot_h = width - left - right, height - top - bottom
+    if not values:
+        return _svg_wrapper(title, "<text x='70' y='120'>No data</text>")
+
+    lower, upper = min(values), max(values)
+    if lower == upper:
+        lower -= 0.5
+        upper += 0.5
+    lower = floor(lower) - 1
+    upper = ceil(upper) + 1
+
+    x_formatter = _format_int_tick if all(float(value).is_integer() for value in values) else _format_tick
+    bin_count = max(2, int(ceil((upper - lower) / bin_width)))
+    counts = [0.0] * bin_count
+    for value in values:
+        idx = min(bin_count - 1, max(0, int((value - lower) / bin_width)))
+        counts[idx] += 1.0
+    densities = [count / (len(values) * bin_width) for count in counts]
+
+    sigma_bins = max(smoothing_sigma / bin_width, 1.0)
+    kernel_radius = max(1, int(round(3 * sigma_bins)))
+    kernel = [exp(-0.5 * (offset / sigma_bins) ** 2) for offset in range(-kernel_radius, kernel_radius + 1)]
+    kernel_sum = sum(kernel) or 1.0
+    kernel = [weight / kernel_sum for weight in kernel]
+
+    points: list[tuple[float, float]] = []
+    peak_density = 0.0
+    for idx in range(bin_count):
+        density = 0.0
+        for kernel_offset, weight in enumerate(kernel, start=-kernel_radius):
+            source_idx = idx + kernel_offset
+            if 0 <= source_idx < bin_count:
+                density += densities[source_idx] * weight
+        x_value = lower + (idx + 0.5) * bin_width
+        points.append((x_value, density))
+        peak_density = max(peak_density, density)
+
+    y_max = peak_density * 1.05 if peak_density > 0 else 1.0
+    parts = _axis_ticks(
+        left,
+        top,
+        plot_w,
+        plot_h,
+        lower,
+        upper,
+        0,
+        y_max,
+        x_formatter=x_formatter,
+    )
+    parts.extend(
+        [
+            f"<line class='axis' x1='{left}' y1='{height-bottom}' x2='{width-right}' y2='{height-bottom}'/>",
+            f"<line class='axis' x1='{left}' y1='{top}' x2='{left}' y2='{height-bottom}'/>",
+        ]
+    )
+    polyline_points = []
+    for x_value, density in points:
+        x = left + _scale(x_value, lower, upper, plot_w)
+        y = height - bottom - _scale(density, 0, y_max, plot_h)
+        polyline_points.append(f"{x:.2f},{y:.2f}")
+    baseline_y = height - bottom
+    area_points = [f"{left:.2f},{baseline_y:.2f}", *polyline_points, f"{width-right:.2f},{baseline_y:.2f}"]
+    parts.append(f"<polygon points='{' '.join(area_points)}' fill='{color}' fill-opacity='0.18'/>")
+    parts.append(f"<polyline fill='none' stroke='{color}' stroke-width='2.5' points='{' '.join(polyline_points)}'/>")
+    parts.append(f"<text x='{width/2:.0f}' y='{height-15}' text-anchor='middle'>{escape(xlabel)}</text>")
+    parts.append(f"<text x='20' y='{height/2:.0f}' transform='rotate(-90 20,{height/2:.0f})' text-anchor='middle'>Probability density</text>")
     return _svg_wrapper(title, ''.join(parts), width, height)
 
 
@@ -448,6 +528,7 @@ def run_qc(fastq_path: str, config: AppConfig, outdir: str) -> dict[str, Any]:
 
     prepared_anchors = prepare_anchors(config.anchors)
     heatmap_reads: list[ReadResult] = []
+    base_qscores: list[float] = []
     lengths: list[int] = []
     read_qscores: list[float] = []
     anchor_counts: Counter[str] = Counter()
@@ -471,6 +552,7 @@ def run_qc(fastq_path: str, config: AppConfig, outdir: str) -> dict[str, Any]:
                 ReadResult(read.name, read.length, read.read_qscore, structure.label, structure.is_reversed, structure.order_valid, hits)
             )
         lengths.append(read.length)
+        base_qscores.extend(float(q) for q in read.phred_scores)
         read_qscores.append(read.read_qscore)
         structure_counts[structure.label] += 1
         structure_orientation_counts[(structure.label, "reversed" if structure.is_reversed else "forward")] += 1
@@ -516,7 +598,10 @@ def run_qc(fastq_path: str, config: AppConfig, outdir: str) -> dict[str, Any]:
 
     _write_text(fig_dir / "read_length_hist.svg", _histogram([float(v) for v in lengths], "Read length distribution", "Read length (bp)"))
     _write_text(fig_dir / "read_length_cdf.svg", _cdf(lengths, "Read length cumulative distribution", "Read length (bp)"))
-    _write_text(fig_dir / "mean_q_hist.svg", _histogram(read_qscores, "Per-read Qscore distribution", "Read Qscore", color="#54A24B"))
+    _write_text(
+        fig_dir / "mean_q_hist.svg",
+        _density_plot(base_qscores, "Per-base quality score density", "Quality score", color="#54A24B"),
+    )
     _write_text(fig_dir / "length_q_scatter.svg", _scatter(lengths, read_qscores, "Read length vs read Qscore"))
     _write_text(
         fig_dir / "anchor_detect_bar.svg",

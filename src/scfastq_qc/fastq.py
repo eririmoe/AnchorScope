@@ -18,10 +18,14 @@ class FastqRead:
         return len(self.sequence)
 
     @property
+    def phred_scores(self) -> list[int]:
+        return [ord(ch) - 33 for ch in self.quality]
+
+    @property
     def read_qscore(self) -> float:
         if not self.quality:
             return 0.0
-        mean_error_rate = sum(10 ** (-(ord(ch) - 33) / 10) for ch in self.quality) / len(self.quality)
+        mean_error_rate = sum(10 ** (-q / 10) for q in self.phred_scores) / len(self.quality)
         if mean_error_rate <= 0:
             return 0.0
         return -10 * log10(mean_error_rate)

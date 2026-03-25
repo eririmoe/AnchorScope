@@ -41,9 +41,12 @@ class SmokeTest(unittest.TestCase):
             self.assertIn('Orientation', report_html)
             hist_svg = (Path(tmpdir) / 'figures' / 'read_length_hist.svg').read_text(encoding='utf-8')
             self.assertIn("font-size='12'", hist_svg)
-            q_svg = (Path(tmpdir) / 'figures' / 'mean_q_hist.svg').read_text(encoding='utf-8')
-            self.assertIn('Per-base quality score density', q_svg)
-            self.assertIn('Probability density', q_svg)
+            base_q_svg = (Path(tmpdir) / 'figures' / 'mean_q_hist.svg').read_text(encoding='utf-8')
+            self.assertIn('Overall base quality distribution', base_q_svg)
+            self.assertIn('Base count', base_q_svg)
+            read_q_svg = (Path(tmpdir) / 'figures' / 'read_q_density.svg').read_text(encoding='utf-8')
+            self.assertIn('Per-read Qscore density', read_q_svg)
+            self.assertIn('Probability density', read_q_svg)
 
     def test_read_qscore_matches_error_rate_definition(self):
         read = FastqRead(name='mixed', sequence='AAAA', quality='I!I!')

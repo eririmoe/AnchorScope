@@ -598,10 +598,8 @@ def run_qc(fastq_path: str, config: AppConfig, outdir: str) -> dict[str, Any]:
 
     _write_text(fig_dir / "read_length_hist.svg", _histogram([float(v) for v in lengths], "Read length distribution", "Read length (bp)"))
     _write_text(fig_dir / "read_length_cdf.svg", _cdf(lengths, "Read length cumulative distribution", "Read length (bp)"))
-    _write_text(
-        fig_dir / "mean_q_hist.svg",
-        _density_plot(base_qscores, "Per-base quality score density", "Quality score", color="#54A24B"),
-    )
+    _write_text(fig_dir / "mean_q_hist.svg", _histogram(base_qscores, "Overall base quality distribution", "Phred quality score", color="#54A24B"))
+    _write_text(fig_dir / "read_q_density.svg", _density_plot(read_qscores, "Per-read Qscore density", "Read Qscore", color="#4C78A8"))
     _write_text(fig_dir / "length_q_scatter.svg", _scatter(lengths, read_qscores, "Read length vs read Qscore"))
     _write_text(
         fig_dir / "anchor_detect_bar.svg",
@@ -703,6 +701,7 @@ def _write_html_report(path: Path, summary: dict[str, Any]) -> None:
   </div>
   <object type='image/svg+xml' data='figures/read_length_cdf.svg'></object>
   <object type='image/svg+xml' data='figures/mean_q_hist.svg'></object>
+  <object type='image/svg+xml' data='figures/read_q_density.svg'></object>
   <object type='image/svg+xml' data='figures/length_q_scatter.svg'></object>
 
   <h2>Anchor detection</h2>

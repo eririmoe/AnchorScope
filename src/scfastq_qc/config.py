@@ -33,6 +33,7 @@ class AppConfig:
     anchors: list[AnchorConfig] = field(default_factory=list)
     structure: StructureConfig = field(default_factory=StructureConfig)
     thresholds: ThresholdConfig = field(default_factory=ThresholdConfig)
+    qscore_method: str = "conservative"  # "conservative" or "arithmetic_mean"
 
 
 def load_config(path: str | Path) -> AppConfig:
@@ -40,9 +41,13 @@ def load_config(path: str | Path) -> AppConfig:
     anchors = [AnchorConfig(**anchor) for anchor in raw.get("anchors", [])]
     structure = StructureConfig(**raw.get("structure", {}))
     thresholds = ThresholdConfig(**raw.get("thresholds", {}))
+    qscore_method = raw.get("qscore_method", "conservative")
+    if qscore_method not in ("conservative", "arithmetic_mean"):
+        raise ValueError(f"qscore_method must be 'conservative' or 'arithmetic_mean', got '{qscore_method}'")
     return AppConfig(
         sample_name=raw.get("sample_name", "sample"),
         anchors=anchors,
         structure=structure,
         thresholds=thresholds,
+        qscore_method=qscore_method,
     )

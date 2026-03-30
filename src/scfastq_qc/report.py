@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from html import escape
@@ -12,7 +13,10 @@ from typing import Any, Callable
 from .anchors import AnchorHit, find_anchor_hits, prepare_anchors, reverse_complement
 from .classify import classify_best_orientation
 from .config import AppConfig
+from .export import export_summary_to_csv, export_structure_classification_to_csv
 from .fastq import read_fastq
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -521,12 +525,26 @@ def _heatmap(read_results: list[ReadResult], max_reads: int) -> str:
     return _svg_wrapper("Read structure heatmap (anchor occupancy)", ''.join(parts), width, height)
 
 
-def run_qc(fastq_path: str, config: AppConfig, outdir: str) -> dict[str, Any]:
+def run_qc(fastq_path: str, config: AppConfig, outdir: str, export_csv: bool = False) -> dict[str, Any]:
+    """运行QC分析并生成报告
+    
+    Args:
+        fastq_path: FASTQ文件路径
+        config: 配置对象
+        outdir: 输出目录
+        export_csv: 是否导出CSV文件
+        
+    Returns:
+        包含QC分析结果的摘要字典
+    """
+    logger.info(f"Starting QC analysis for {fastq_path}")
+    
     out_path = Path(outdir)
     fig_dir = out_path / "figures"
     fig_dir.mkdir(parents=True, exist_ok=True)
 
     prepared_anchors = prepare_anchors(config.anchors)
+    logger.info(f"Prepared {len(prepared_anchors)} anchors")
     heatmap_reads: list[ReadResult] = []
     base_qscores: list[float] = []
     lengths: list[int] = []
@@ -541,9 +559,11 @@ def run_qc(fastq_path: str, config: AppConfig, outdir: str) -> dict[str, Any]:
     total_reads = 0
     total_bases = 0
 
-    for read in read_fastq(fastq_path):
+    for read in read_fastq(fastq_path, qscore_method=config.qscore_method):
         total_reads += 1
         total_bases += read.length
+        if total_reads % 10000 == 0:
+            logger.debug(f"Processed {total_reads} reads")
         forward_hits = find_anchor_hits(read.sequence, prepared_anchors)
         reverse_hits = find_anchor_hits(reverse_complement(read.sequence), prepared_anchors)
         structure, hits = classify_best_orientation(forward_hits, reverse_hits, config.structure.expected_order)
@@ -595,6 +615,14 @@ def run_qc(fastq_path: str, config: AppConfig, outdir: str) -> dict[str, Any]:
         "correct_anchor_order_ratio": (order_valid_count / total_reads) if total_reads else 0.0,
     }
     _write_text(out_path / "summary.json", json.dumps(summary, indent=2))
+    logger.info(f"Summary saved to {out_path / 'summary.json'}")
+
+    # 导出CSV文件
+    if export_csv:
+        logger.info("Exporting CSV files")
+        export_summary_to_csv(summary, out_path / "summary.csv")
+        export_structure_classification_to_csv(summary, out_path / "structure_classification.csv")
+        logger.info(f"CSV files exported to {out_path}")
 
     _write_text(fig_dir / "read_length_hist.svg", _histogram([float(v) for v in lengths], "Read length distribution", "Read length (bp)"))
     _write_text(fig_dir / "read_length_cdf.svg", _cdf(lengths, "Read length cumulative distribution", "Read length (bp)"))
@@ -619,6 +647,7 @@ def run_qc(fastq_path: str, config: AppConfig, outdir: str) -> dict[str, Any]:
     )
     _write_text(fig_dir / "structure_heatmap.svg", _heatmap(heatmap_reads, config.thresholds.heatmap_max_reads))
     _write_html_report(out_path / "report.html", summary)
+    logger.info(f"QC analysis completed. Output directory: {outdir}")
     return summary
 
 

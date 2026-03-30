@@ -1,5 +1,6 @@
 {
   "sample_name": "example_sample",
+  "qscore_method": "conservative",
   "anchors": [
     {
       "name": "adapter_5p",

@@ -8,6 +8,7 @@ from unittest import mock
 
 from scfastq_qc import anchors as anchors_module
 from scfastq_qc.anchors import find_anchor_hits, get_rust_anchor_engine, prepare_anchors, reverse_complement
+from scfastq_qc.batch import BatchProcessingError, _allocate_output_dir, run_batch_qc
 from scfastq_qc.classify import classify_best_orientation
 from scfastq_qc.config import AnchorConfig, AppConfig, StructureConfig, ThresholdConfig, load_config
 from scfastq_qc.fastq import FastqRead, read_fastq
@@ -54,12 +55,58 @@ class SmokeTest(unittest.TestCase):
         expected_qscore = -10 * log10(expected_error_rate)
         arithmetic_mean_q = (40 + 0 + 40 + 0) / 4
         self.assertTrue(isclose(read.read_qscore, expected_qscore, rel_tol=1e-9))
-        self.assertTrue(isclose(read.mean_q, expected_qscore, rel_tol=1e-9))
+        self.assertTrue(isclose(read.mean_q, arithmetic_mean_q, rel_tol=1e-9))
         self.assertLess(read.read_qscore, arithmetic_mean_q)
+
+    def test_mean_q_preserves_arithmetic_mean_semantics(self):
+        read = FastqRead(name='mixed', sequence='AAAA', quality='I!I!', qscore_method='conservative')
+        arithmetic_mean_q = (40 + 0 + 40 + 0) / 4
+        self.assertTrue(isclose(read.mean_q, arithmetic_mean_q, rel_tol=1e-9))
+        self.assertLess(read.read_qscore, read.mean_q)
 
     def test_read_qscore_handles_uniform_extremes(self):
         self.assertEqual(FastqRead(name='low', sequence='AAAA', quality='!!!!').read_qscore, 0.0)
         self.assertEqual(FastqRead(name='high', sequence='AAAA', quality='IIII').read_qscore, 40.0)
+
+    def test_batch_processing_raises_when_a_file_fails(self):
+        repo = Path(__file__).resolve().parents[1]
+        config = load_config(repo / 'examples' / 'config.json')
+        fastq_path = repo / 'examples' / 'example.fastq'
+        failed_result = {"file": str(fastq_path), "status": "failed", "error": "boom"}
+        summary = {"total_count": 1, "success_count": 0, "failed_count": 1, "success_rate": 0.0, "results": [failed_result]}
+        with mock.patch('pathlib.Path.mkdir'), \
+             mock.patch('scfastq_qc.batch.generate_batch_summary', return_value=summary), \
+             mock.patch('scfastq_qc.batch.run_qc_single', return_value=failed_result):
+            with self.assertRaises(BatchProcessingError) as ctx:
+                run_batch_qc([fastq_path], config, str(repo / 'batch-out'), parallel=1, continue_on_error=False)
+        self.assertEqual(ctx.exception.failed_results, [failed_result])
+
+    def test_batch_output_dirs_are_deduplicated_for_duplicate_stems(self):
+        output_root = Path('batch-output')
+        used_names: set[str] = set()
+        first = _allocate_output_dir(output_root, Path('lane1/sample.fastq'), used_names)
+        second = _allocate_output_dir(output_root, Path('lane2/sample.fastq'), used_names)
+        third = _allocate_output_dir(output_root, Path('lane3/sample_2.fastq'), used_names)
+        self.assertEqual(first.name, 'sample')
+        self.assertEqual(second.name, 'sample_2')
+        self.assertEqual(third.name, 'sample_2_2')
+
+    def test_cli_batch_exits_nonzero_on_batch_failure(self):
+        from scfastq_qc import cli as cli_module
+
+        failed_result = {"file": "broken.fastq", "status": "failed", "error": "boom"}
+        error = BatchProcessingError(
+            results=[failed_result],
+            summary={"total_count": 1, "success_count": 0, "failed_count": 1, "success_rate": 0.0, "results": [failed_result]},
+        )
+        with mock.patch.object(cli_module, 'setup_logging'), \
+             mock.patch.object(cli_module, 'load_config', return_value=mock.sentinel.config), \
+             mock.patch.object(cli_module, 'collect_fastq_files', return_value=[Path('broken.fastq')]), \
+             mock.patch('scfastq_qc.batch.run_batch_qc', side_effect=error), \
+             mock.patch('sys.argv', ['scfastq-qc', 'batch', '--input', 'inputs.txt', '--config', 'config.json', '--outdir', 'out']):
+            with self.assertRaises(SystemExit) as ctx:
+                cli_module.main()
+        self.assertEqual(ctx.exception.code, 1)
 
     def test_prepare_anchors_exact_and_approximate_paths(self):
         anchors = prepare_anchors(

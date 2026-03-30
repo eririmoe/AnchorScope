@@ -178,7 +178,14 @@ text {{ font-family: Arial, sans-serif; fill: #222; }}
 </svg>"""
 
 
-def _histogram(values: list[float], title: str, xlabel: str, bins: int = 20, color: str = "#4C78A8") -> str:
+def _histogram(
+    values: list[float],
+    title: str,
+    xlabel: str,
+    bins: int = 20,
+    color: str = "#4C78A8",
+    ylabel: str = "Count",
+) -> str:
     width, height = 800, 400
     left, right, top, bottom = 70, 30, 60, 60
     plot_w, plot_h = width - left - right, height - top - bottom
@@ -224,7 +231,9 @@ def _histogram(values: list[float], title: str, xlabel: str, bins: int = 20, col
         y = height - bottom - bar_h
         parts.append(f"<rect x='{x:.2f}' y='{y:.2f}' width='{max(bar_w-1,1):.2f}' height='{bar_h:.2f}' fill='{color}'/>")
     parts.append(f"<text x='{width/2:.0f}' y='{height-15}' text-anchor='middle'>{escape(xlabel)}</text>")
-    parts.append(f"<text x='20' y='{height/2:.0f}' transform='rotate(-90 20,{height/2:.0f})' text-anchor='middle'>Count</text>")
+    parts.append(
+        f"<text x='20' y='{height/2:.0f}' transform='rotate(-90 20,{height/2:.0f})' text-anchor='middle'>{escape(ylabel)}</text>"
+    )
     return _svg_wrapper(title, ''.join(parts), width, height)
 
 
@@ -626,7 +635,16 @@ def run_qc(fastq_path: str, config: AppConfig, outdir: str, export_csv: bool = F
 
     _write_text(fig_dir / "read_length_hist.svg", _histogram([float(v) for v in lengths], "Read length distribution", "Read length (bp)"))
     _write_text(fig_dir / "read_length_cdf.svg", _cdf(lengths, "Read length cumulative distribution", "Read length (bp)"))
-    _write_text(fig_dir / "mean_q_hist.svg", _histogram(base_qscores, "Overall base quality distribution", "Phred quality score", color="#54A24B"))
+    _write_text(
+        fig_dir / "mean_q_hist.svg",
+        _histogram(
+            base_qscores,
+            "Overall base quality distribution",
+            "Phred quality score",
+            color="#54A24B",
+            ylabel="Base count",
+        ),
+    )
     _write_text(fig_dir / "read_q_density.svg", _density_plot(read_qscores, "Per-read Qscore density", "Read Qscore", color="#4C78A8"))
     _write_text(fig_dir / "length_q_scatter.svg", _scatter(lengths, read_qscores, "Read length vs read Qscore"))
     _write_text(

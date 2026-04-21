@@ -97,8 +97,7 @@ class SmokeTest(unittest.TestCase):
             results=[failed_result],
             summary={"total_count": 1, "success_count": 0, "failed_count": 1, "success_rate": 0.0, "results": [failed_result]},
         )
-        mock_config = mock.MagicMock()
-        mock_config.samples = None
+        mock_config = AppConfig(samples=None)
         with mock.patch.object(cli_module, 'setup_logging'), \
              mock.patch.object(cli_module, 'load_config', return_value=mock_config), \
              mock.patch.object(cli_module, 'collect_fastq_files', return_value=[Path('broken.fastq')]), \

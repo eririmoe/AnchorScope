@@ -113,7 +113,7 @@ def main() -> None:
                 run_qc(entry.path, effective_config, args.outdir, export_csv=args.export_csv)
             else:
                 fastq_files = [Path(e.path) for e in config.samples]
-                sample_names: list[str | None] = [e.sample_name for e in config.samples]
+                sample_names: list[str] = [e.sample_name for e in config.samples]
                 try:
                     run_batch_qc(
                         fastq_files=fastq_files,
@@ -139,7 +139,7 @@ def main() -> None:
 
     if config.samples and not args.input:
         fastq_files = [Path(e.path) for e in config.samples]
-        batch_sample_names: list[str | None] = [e.sample_name for e in config.samples]
+        batch_sample_names: list[str] = [e.sample_name for e in config.samples]
     elif args.input:
         fastq_files = collect_fastq_files(args.input, args.pattern)
         batch_sample_names = []

@@ -1,6 +1,20 @@
 {
   "sample_name": "example_sample",
   "fastq_path": "examples/example.fastq",
+  "config_summary": {
+    "anchors": [
+      "adapter_5p",
+      "polyT"
+    ],
+    "expected_order": [
+      "adapter_5p",
+      "polyT"
+    ],
+    "long_read_min_bp": 20,
+    "long_read_min_q": 20,
+    "terminal_anchor_max_offset": 0.15,
+    "high_n_fraction": 0.1
+  },
   "total_reads": 4,
   "total_bases": 96,
   "mean_read_length": 24.0,

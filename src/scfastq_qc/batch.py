@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 from multiprocessing import Pool
@@ -87,12 +88,14 @@ def _write_batch_report(summary: dict[str, Any], outdir: Path) -> None:
     _write_batch_html_report(summary, outdir)
 
 
-def run_qc_single(args: tuple[Path, AppConfig, Path, bool]) -> dict[str, Any]:
+def run_qc_single(args: tuple[Path, AppConfig, Path, bool, str | None]) -> dict[str, Any]:
     """Process a single FASTQ file for batch execution."""
-    fastq_path, config, outdir, export_csv = args
+    fastq_path, config, outdir, export_csv, sample_name = args
+    effective_name = sample_name if sample_name is not None else fastq_path.stem
+    effective_config = dataclasses.replace(config, sample_name=effective_name)
     try:
         logger.info("Processing: %s", fastq_path)
-        summary = run_qc(str(fastq_path), config, str(outdir), export_csv=export_csv)
+        summary = run_qc(str(fastq_path), effective_config, str(outdir), export_csv=export_csv)
         logger.info("Completed: %s", fastq_path)
         return {"file": str(fastq_path), "status": "success", "summary": summary}
     except Exception as exc:
@@ -100,8 +103,7 @@ def run_qc_single(args: tuple[Path, AppConfig, Path, bool]) -> dict[str, Any]:
         return {"file": str(fastq_path), "status": "failed", "error": str(exc)}
 
 
-def _allocate_output_dir(output_root: Path, fastq_path: Path, used_names: set[str]) -> Path:
-    base_name = fastq_path.stem or fastq_path.name
+def _allocate_output_dir(output_root: Path, base_name: str, used_names: set[str]) -> Path:
     candidate = base_name
     suffix = 2
     while candidate in used_names:
@@ -117,12 +119,16 @@ def _build_batch_tasks(
     output_root: Path,
     export_csv: bool,
     continue_on_error: bool,
-) -> tuple[list[tuple[Path, AppConfig, Path, bool]], list[dict[str, Any]]]:
-    tasks: list[tuple[Path, AppConfig, Path, bool]] = []
+    sample_names: list[str | None] | None = None,
+) -> tuple[list[tuple[Path, AppConfig, Path, bool, str | None]], list[dict[str, Any]]]:
+    tasks: list[tuple[Path, AppConfig, Path, bool, str | None]] = []
     failures: list[dict[str, Any]] = []
     used_output_names: set[str] = set()
 
-    for fastq_path in fastq_files:
+    for i, fastq_path in enumerate(fastq_files):
+        sample_name = sample_names[i] if sample_names is not None else None
+        base_name = sample_name if sample_name is not None else (fastq_path.stem or fastq_path.name)
+
         if not fastq_path.exists():
             error = f"File not found: {fastq_path}"
             logger.warning(error)
@@ -131,8 +137,8 @@ def _build_batch_tasks(
                 break
             continue
 
-        file_outdir = _allocate_output_dir(output_root, fastq_path, used_output_names)
-        tasks.append((fastq_path, config, file_outdir, export_csv))
+        file_outdir = _allocate_output_dir(output_root, base_name, used_output_names)
+        tasks.append((fastq_path, config, file_outdir, export_csv, sample_name))
 
     return tasks, failures
 
@@ -144,12 +150,13 @@ def run_batch_qc(
     parallel: int = 1,
     continue_on_error: bool = False,
     export_csv: bool = False,
+    sample_names: list[str | None] | None = None,
 ) -> list[dict[str, Any]]:
     """Run QC across multiple FASTQ files."""
     out_path = Path(outdir)
     out_path.mkdir(parents=True, exist_ok=True)
 
-    tasks, results = _build_batch_tasks(fastq_files, config, out_path, export_csv, continue_on_error)
+    tasks, results = _build_batch_tasks(fastq_files, config, out_path, export_csv, continue_on_error, sample_names)
     logger.info("Starting batch processing: %s files", len(tasks))
 
     if tasks and (continue_on_error or not results):

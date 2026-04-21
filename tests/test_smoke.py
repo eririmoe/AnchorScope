@@ -11,7 +11,7 @@ from scfastq_qc import anchors as anchors_module
 from scfastq_qc.anchors import find_anchor_hits, get_rust_anchor_engine, prepare_anchors, reverse_complement
 from scfastq_qc.batch import BatchProcessingError, _allocate_output_dir, run_batch_qc
 from scfastq_qc.classify import classify_best_orientation
-from scfastq_qc.config import AnchorConfig, AppConfig, StructureConfig, ThresholdConfig, load_config
+from scfastq_qc.config import AnchorConfig, AppConfig, SampleEntry, StructureConfig, ThresholdConfig, load_config
 from scfastq_qc.fastq import FastqRead, read_fastq
 from scfastq_qc.report import run_qc
 
@@ -82,9 +82,9 @@ class SmokeTest(unittest.TestCase):
     def test_batch_output_dirs_are_deduplicated_for_duplicate_stems(self):
         output_root = Path('batch-output')
         used_names: set[str] = set()
-        first = _allocate_output_dir(output_root, Path('lane1/sample.fastq'), used_names)
-        second = _allocate_output_dir(output_root, Path('lane2/sample.fastq'), used_names)
-        third = _allocate_output_dir(output_root, Path('lane3/sample_2.fastq'), used_names)
+        first = _allocate_output_dir(output_root, 'sample', used_names)
+        second = _allocate_output_dir(output_root, 'sample', used_names)
+        third = _allocate_output_dir(output_root, 'sample_2', used_names)
         self.assertEqual(first.name, 'sample')
         self.assertEqual(second.name, 'sample_2')
         self.assertEqual(third.name, 'sample_2_2')
@@ -97,14 +97,124 @@ class SmokeTest(unittest.TestCase):
             results=[failed_result],
             summary={"total_count": 1, "success_count": 0, "failed_count": 1, "success_rate": 0.0, "results": [failed_result]},
         )
+        mock_config = AppConfig(samples=None)
         with mock.patch.object(cli_module, 'setup_logging'), \
-             mock.patch.object(cli_module, 'load_config', return_value=mock.sentinel.config), \
+             mock.patch.object(cli_module, 'load_config', return_value=mock_config), \
              mock.patch.object(cli_module, 'collect_fastq_files', return_value=[Path('broken.fastq')]), \
              mock.patch('scfastq_qc.batch.run_batch_qc', side_effect=error), \
              mock.patch('sys.argv', ['scfastq-qc', 'batch', '--input', 'inputs.txt', '--config', 'config.json', '--outdir', 'out']):
             with self.assertRaises(SystemExit) as ctx:
                 cli_module.main()
         self.assertEqual(ctx.exception.code, 1)
+
+    def test_load_config_parses_samples_list(self):
+        with self._temporary_directory() as tmpdir:
+            config_path = Path(tmpdir) / 'multi.json'
+            config_path.write_text(json.dumps({
+                "samples": [
+                    {"sample_name": "s1", "path": "/data/s1.fastq"},
+                    {"sample_name": "s2", "path": "/data/s2.fastq"},
+                ],
+                "anchors": [],
+                "structure": {"expected_order": []},
+            }), encoding='utf-8')
+            config = load_config(config_path)
+        self.assertIsNotNone(config.samples)
+        self.assertEqual(len(config.samples), 2)
+        self.assertEqual(config.samples[0].sample_name, 's1')
+        self.assertEqual(config.samples[0].path, '/data/s1.fastq')
+        self.assertEqual(config.samples[1].sample_name, 's2')
+
+    def test_load_config_without_samples_has_none(self):
+        repo = Path(__file__).resolve().parents[1]
+        config = load_config(repo / 'examples' / 'config.json')
+        self.assertIsNone(config.samples)
+
+    def test_batch_uses_explicit_sample_name_in_report(self):
+        repo = Path(__file__).resolve().parents[1]
+        config = load_config(repo / 'examples' / 'config.json')
+        fastq_path = repo / 'examples' / 'example.fastq'
+        with self._temporary_directory() as tmpdir:
+            from scfastq_qc.batch import run_batch_qc
+            results = run_batch_qc(
+                fastq_files=[fastq_path],
+                config=config,
+                outdir=tmpdir,
+                sample_names=['my_explicit_name'],
+            )
+        self.assertEqual(results[0]['status'], 'success')
+        self.assertEqual(results[0]['summary']['sample_name'], 'my_explicit_name')
+
+    def test_batch_falls_back_to_file_stem_when_no_sample_name(self):
+        repo = Path(__file__).resolve().parents[1]
+        config = load_config(repo / 'examples' / 'config.json')
+        fastq_path = repo / 'examples' / 'example.fastq'
+        with self._temporary_directory() as tmpdir:
+            from scfastq_qc.batch import run_batch_qc
+            results = run_batch_qc(
+                fastq_files=[fastq_path],
+                config=config,
+                outdir=tmpdir,
+                sample_names=None,
+            )
+        self.assertEqual(results[0]['status'], 'success')
+        self.assertEqual(results[0]['summary']['sample_name'], 'example')
+
+    def test_cli_run_dispatches_to_batch_for_multi_sample_config(self):
+        from scfastq_qc import cli as cli_module
+        from scfastq_qc.config import SampleEntry
+
+        repo = Path(__file__).resolve().parents[1]
+        base_config = load_config(repo / 'examples' / 'config.json')
+        import dataclasses
+        multi_config = dataclasses.replace(base_config, samples=[
+            SampleEntry(sample_name='s1', path=str(repo / 'examples' / 'example.fastq')),
+            SampleEntry(sample_name='s2', path=str(repo / 'examples' / 'example.fastq')),
+        ])
+        with self._temporary_directory() as tmpdir:
+            with mock.patch.object(cli_module, 'setup_logging'), \
+                 mock.patch.object(cli_module, 'load_config', return_value=multi_config), \
+                 mock.patch('sys.argv', ['scfastq-qc', 'run', '--config', 'config.json', '--outdir', tmpdir]):
+                cli_module.main()
+            self.assertTrue((Path(tmpdir) / 'batch_report.html').exists())
+
+    def test_cli_run_single_sample_from_config_samples(self):
+        from scfastq_qc import cli as cli_module
+        from scfastq_qc.config import SampleEntry
+
+        repo = Path(__file__).resolve().parents[1]
+        base_config = load_config(repo / 'examples' / 'config.json')
+        import dataclasses
+        single_config = dataclasses.replace(base_config, samples=[
+            SampleEntry(sample_name='only_sample', path=str(repo / 'examples' / 'example.fastq')),
+        ])
+        with self._temporary_directory() as tmpdir:
+            with mock.patch.object(cli_module, 'setup_logging'), \
+                 mock.patch.object(cli_module, 'load_config', return_value=single_config), \
+                 mock.patch('sys.argv', ['scfastq-qc', 'run', '--config', 'config.json', '--outdir', tmpdir]):
+                cli_module.main()
+            self.assertTrue((Path(tmpdir) / 'report.html').exists())
+            data = json.loads((Path(tmpdir) / 'summary.json').read_text())
+            self.assertEqual(data['sample_name'], 'only_sample')
+
+    def test_cli_batch_uses_config_samples_when_no_input(self):
+        from scfastq_qc import cli as cli_module
+        from scfastq_qc.config import SampleEntry
+
+        repo = Path(__file__).resolve().parents[1]
+        base_config = load_config(repo / 'examples' / 'config.json')
+        import dataclasses
+        multi_config = dataclasses.replace(base_config, samples=[
+            SampleEntry(sample_name='alpha', path=str(repo / 'examples' / 'example.fastq')),
+            SampleEntry(sample_name='beta', path=str(repo / 'examples' / 'example.fastq')),
+        ])
+        with self._temporary_directory() as tmpdir:
+            with mock.patch.object(cli_module, 'setup_logging'), \
+                 mock.patch.object(cli_module, 'load_config', return_value=multi_config), \
+                 mock.patch('sys.argv', ['scfastq-qc', 'batch', '--config', 'config.json', '--outdir', tmpdir]):
+                cli_module.main()
+            summary = json.loads((Path(tmpdir) / 'batch_summary.json').read_text())
+            self.assertEqual(summary['success_count'], 2)
 
     def test_prepare_anchors_exact_and_approximate_paths(self):
         anchors = prepare_anchors(

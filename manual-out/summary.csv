@@ -1,0 +1,37 @@
+Metric,Value
+Sample Name,example_sample
+Total Reads,4
+Total Bases,96
+Mean Read Length,24.00
+Median Read Length,25.0
+N50,25
+Min Read Length,20
+Max Read Length,26
+Median Read Qscore,39.50
+Long High-Quality Ratio,1.0000
+Reversed Read Ratio,0.0000
+Correct Anchor Order Ratio,0.5000
+5' Truncation Ratio,0.0000
+3' Truncation Ratio,0.2500
+High-N Read Ratio,0.0000
+Rust Accelerator,python-fallback
+
+Anchor Detection Ratios
+adapter_5p,0.7500
+polyT,0.7500
+
+QC Bucket Counts
+three_prime_truncated,1
+pass,1
+missing_5p,1
+missing_3p,1
+
+Structure Classification Counts
+full_structure,2
+missing_5p_anchor,1
+missing_3p_anchor,1
+
+Structure Orientation Counts
+full_structure (forward),2
+missing_5p_anchor (forward),1
+missing_3p_anchor (forward),1

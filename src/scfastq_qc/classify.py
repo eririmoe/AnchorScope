@@ -25,6 +25,21 @@ def classify_structure(hits: list[AnchorHit], expected_order: list[str]) -> Read
 
     repeated = len(set(detected)) != len(detected)
     if repeated:
+        if expected_order:
+            expected_count = len(expected_order)
+            for start in range(0, max(0, len(unique_in_order) - expected_count + 1)):
+                if unique_in_order[start : start + expected_count] == expected_order:
+                    trailing = unique_in_order[start + expected_count :]
+                    if trailing and trailing[0] == expected_order[0]:
+                        return ReadStructure(
+                            label="concatemer_candidate",
+                            order_valid=False,
+                            detected_anchors=unique_in_order,
+                        )
+            if detected.count(expected_order[0]) > 1:
+                return ReadStructure(label="internal_5p_anchor", order_valid=False, detected_anchors=unique_in_order)
+            if detected.count(expected_order[-1]) > 1:
+                return ReadStructure(label="internal_3p_anchor", order_valid=False, detected_anchors=unique_in_order)
         return ReadStructure(label="duplicated_anchor", order_valid=False, detected_anchors=unique_in_order)
 
     if not expected_order:
@@ -54,6 +69,9 @@ def _structure_score(structure: ReadStructure, hits: list[AnchorHit]) -> tuple[i
         "partial_structure": 3,
         "missing_5p_anchor": 2,
         "missing_3p_anchor": 2,
+        "concatemer_candidate": 1,
+        "internal_5p_anchor": 1,
+        "internal_3p_anchor": 1,
         "duplicated_anchor": 1,
         "no_anchor_detected": 0,
     }

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import ctypes
+import logging
+import os
 import re
 import shutil
 import subprocess
@@ -9,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import AnchorConfig
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -31,6 +35,7 @@ class PreparedAnchor:
 _RUST_ENGINE_LOCK = Lock()
 _RUST_BUILD_ATTEMPTED = False
 _RUST_ENGINE: RustAnchorEngine | None = None
+_RUST_STATUS: dict[str, str] = {"mode": "python-fallback", "detail": "Rust accelerator not evaluated yet"}
 _RC_TRANSLATION = str.maketrans("ACGTNacgtn", "TGCANtgcan")
 
 
@@ -60,7 +65,14 @@ class RustAnchorEngine:
 
 
 def _rust_library_candidates(repo_root: Path) -> list[Path]:
+    package_root = Path(__file__).resolve().parent
+    env_path = os.environ.get("SCFASTQ_QC_RUST_LIB")
+    env_candidate = [Path(env_path)] if env_path else []
     return [
+        *env_candidate,
+        package_root / "_native" / "scfastq_qc_rs.dll",
+        package_root / "_native" / "libscfastq_qc_rs.so",
+        package_root / "_native" / "libscfastq_qc_rs.dylib",
         repo_root / "target" / "release" / "libscfastq_qc_rs.so",
         repo_root / "target" / "release" / "scfastq_qc_rs.dll",
         repo_root / "target" / "release" / "libscfastq_qc_rs.dylib",
@@ -79,15 +91,25 @@ def _find_rust_library(repo_root: Path) -> Path | None:
 
 def _try_build_rust_library(repo_root: Path) -> None:
     manifest_path = repo_root / "rust" / "anchor_engine" / "Cargo.toml"
-    if not manifest_path.exists() or shutil.which("cargo") is None:
+    cargo_bin = shutil.which("cargo")
+    if not manifest_path.exists():
+        _RUST_STATUS.update(mode="python-fallback", detail="Rust manifest not found; using Python implementation")
         return
-    subprocess.run(
-        ["cargo", "build", "--release", "--manifest-path", str(manifest_path)],
+    if cargo_bin is None:
+        _RUST_STATUS.update(mode="python-fallback", detail="cargo not found; using Python implementation")
+        return
+    logger.info("Attempting to build Rust accelerator with cargo")
+    result = subprocess.run(
+        [cargo_bin, "build", "--release", "--manifest-path", str(manifest_path)],
         check=False,
         cwd=repo_root,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+    if result.returncode == 0:
+        _RUST_STATUS.update(mode="build-succeeded", detail="Rust accelerator built successfully")
+    else:
+        _RUST_STATUS.update(mode="python-fallback", detail="cargo build failed; using Python implementation")
 
 
 def get_rust_anchor_engine() -> RustAnchorEngine | None:
@@ -104,13 +126,22 @@ def get_rust_anchor_engine() -> RustAnchorEngine | None:
             _try_build_rust_library(repo_root)
             library_path = _find_rust_library(repo_root)
         if library_path is None:
+            if _RUST_STATUS["mode"] == "python-fallback" and _RUST_STATUS["detail"] == "Rust accelerator not evaluated yet":
+                _RUST_STATUS.update(mode="python-fallback", detail="Rust shared library not found; using Python implementation")
             return None
         try:
             _RUST_ENGINE = RustAnchorEngine(library_path)
+            _RUST_STATUS.update(mode="active", detail=f"Loaded Rust accelerator from {library_path}")
         except Exception:
             _RUST_BUILD_ATTEMPTED = True
+            _RUST_STATUS.update(mode="python-fallback", detail=f"Failed to load Rust library at {library_path}; using Python implementation")
             return None
         return _RUST_ENGINE
+
+
+def get_rust_status() -> dict[str, str]:
+    get_rust_anchor_engine()
+    return dict(_RUST_STATUS)
 
 
 def _validated_max_mismatches(anchor: AnchorConfig) -> int:

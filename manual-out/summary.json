@@ -1,0 +1,101 @@
+{
+  "sample_name": "example_sample",
+  "fastq_path": "examples/example.fastq",
+  "total_reads": 4,
+  "total_bases": 96,
+  "mean_read_length": 24.0,
+  "median_read_length": 25.0,
+  "n50": 25,
+  "min_read_length": 20,
+  "max_read_length": 26,
+  "median_read_qscore": 39.5,
+  "long_high_quality_ratio": 1.0,
+  "reversed_read_ratio": 0.0,
+  "five_prime_truncation_ratio": 0.0,
+  "three_prime_truncation_ratio": 0.25,
+  "high_n_read_ratio": 0.0,
+  "invalid_base_read_ratio": 0.0,
+  "anchor_detection_ratio": {
+    "adapter_5p": 0.75,
+    "polyT": 0.75
+  },
+  "anchor_quality_stats": {
+    "adapter_5p": {
+      "detection_ratio": 0.75,
+      "mean_best_mismatches": 0.0,
+      "multi_hit_ratio": 0.0,
+      "mean_hits_per_positive_read": 1.0
+    },
+    "polyT": {
+      "detection_ratio": 0.75,
+      "mean_best_mismatches": 0.0,
+      "multi_hit_ratio": 0.0,
+      "mean_hits_per_positive_read": 1.0
+    }
+  },
+  "structure_counts": {
+    "full_structure": 2,
+    "missing_5p_anchor": 1,
+    "missing_3p_anchor": 1
+  },
+  "structure_orientation_counts": {
+    "full_structure": {
+      "forward": 2
+    },
+    "missing_5p_anchor": {
+      "forward": 1
+    },
+    "missing_3p_anchor": {
+      "forward": 1
+    }
+  },
+  "correct_anchor_order_ratio": 0.5,
+  "qc_bucket_counts": {
+    "three_prime_truncated": 1,
+    "pass": 1,
+    "missing_5p": 1,
+    "missing_3p": 1
+  },
+  "qc_bucket_ratios": {
+    "three_prime_truncated": 0.25,
+    "pass": 0.25,
+    "missing_5p": 0.25,
+    "missing_3p": 0.25
+  },
+  "rust_accelerator": {
+    "mode": "python-fallback",
+    "detail": "cargo not found; using Python implementation"
+  },
+  "qc_verdicts": {
+    "long_high_quality_ratio": {
+      "label": "Long high-quality ratio",
+      "value": 1.0,
+      "status": "pass"
+    },
+    "correct_anchor_order_ratio": {
+      "label": "Correct anchor order ratio",
+      "value": 0.5,
+      "status": "warn"
+    },
+    "no_anchor_ratio": {
+      "label": "No-anchor ratio",
+      "value": 0.0,
+      "status": "pass"
+    },
+    "reversed_read_ratio": {
+      "label": "Reversed read ratio",
+      "value": 0.0,
+      "status": "pass"
+    },
+    "high_n_read_ratio": {
+      "label": "High-N read ratio",
+      "value": 0.0,
+      "status": "pass"
+    },
+    "overall": {
+      "label": "Overall QC",
+      "value": null,
+      "status": "warn"
+    }
+  }
+}

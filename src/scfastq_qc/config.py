@@ -25,6 +25,21 @@ class ThresholdConfig:
     long_read_min_bp: int = 1000
     long_read_min_q: float = 10.0
     heatmap_max_reads: int = 200
+    end_proximity_bp: int = 150
+    end_proximity_fraction: float = 0.15
+    max_n_fraction: float = 0.10
+    terminal_anchor_max_offset: float = 0.15
+    high_n_fraction: float = 0.1
+    warn_long_high_quality_ratio: float = 0.7
+    fail_long_high_quality_ratio: float = 0.5
+    warn_correct_anchor_order_ratio: float = 0.7
+    fail_correct_anchor_order_ratio: float = 0.5
+    warn_no_anchor_ratio: float = 0.2
+    fail_no_anchor_ratio: float = 0.35
+    warn_reversed_read_ratio: float = 0.3
+    fail_reversed_read_ratio: float = 0.5
+    warn_high_n_ratio: float = 0.1
+    fail_high_n_ratio: float = 0.2
 
 
 @dataclass

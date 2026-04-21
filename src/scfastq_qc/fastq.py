@@ -6,6 +6,8 @@ from math import log10
 from pathlib import Path
 from typing import Iterator
 
+VALID_BASES = frozenset("ACGTN")
+
 
 @dataclass
 class FastqRead:
@@ -23,27 +25,47 @@ class FastqRead:
         return [ord(ch) - 33 for ch in self.quality]
 
     @property
+    def normalized_sequence(self) -> str:
+        return self.sequence.upper()
+
+    @property
+    def n_count(self) -> int:
+        return self.normalized_sequence.count("N")
+
+    @property
+    def invalid_base_count(self) -> int:
+        return sum(1 for base in self.normalized_sequence if base not in VALID_BASES)
+
+    @property
     def read_qscore(self) -> float:
         if not self.quality:
             return 0.0
-        
+
         if self.qscore_method == "arithmetic_mean":
-            # Traditional method: arithmetic mean of Phred scores
             return sum(self.phred_scores) / len(self.phred_scores)
-        else:
-            # Conservative method: average error rate then convert back to Qscore
-            mean_error_rate = sum(10 ** (-q / 10) for q in self.phred_scores) / len(self.quality)
-            if mean_error_rate <= 0:
-                return 0.0
-            return -10 * log10(mean_error_rate)
+
+        mean_error_rate = sum(10 ** (-q / 10) for q in self.phred_scores) / len(self.quality)
+        if mean_error_rate <= 0:
+            return 0.0
+        return -10 * log10(mean_error_rate)
 
     @property
     def mean_q(self) -> float:
-        # Preserve the historical API semantics: mean_q is the arithmetic
-        # mean of per-base Phred scores regardless of read-level Qscore mode.
         if not self.quality:
             return 0.0
         return sum(self.phred_scores) / len(self.phred_scores)
+
+    @property
+    def n_fraction(self) -> float:
+        if not self.length:
+            return 0.0
+        return self.n_count / self.length
+
+    @property
+    def invalid_base_fraction(self) -> float:
+        if not self.length:
+            return 0.0
+        return self.invalid_base_count / self.length
 
 
 def open_text(path: str | Path):
@@ -55,13 +77,25 @@ def open_text(path: str | Path):
 
 def read_fastq(path: str | Path, qscore_method: str = "conservative") -> Iterator[FastqRead]:
     with open_text(path) as handle:
+        record_index = 0
         while True:
             header = handle.readline()
             if not header:
                 break
-            sequence = handle.readline().rstrip("\r\n")
+            record_index += 1
+            if not header.startswith("@"):
+                raise ValueError(f"Malformed FASTQ header at record #{record_index}: {header.strip()!r}")
+            sequence_line = handle.readline()
             plus = handle.readline()
-            quality = handle.readline().rstrip("\r\n")
+            quality_line = handle.readline()
+            if not sequence_line or not plus or not quality_line:
+                raise ValueError(f"Malformed FASTQ record #{record_index}: incomplete 4-line record for {header.strip()}")
+            sequence = sequence_line.rstrip("\r\n")
+            quality = quality_line.rstrip("\r\n")
             if not plus.startswith("+"):
                 raise ValueError(f"Malformed FASTQ record for {header.strip()}")
+            if len(sequence) != len(quality):
+                raise ValueError(
+                    f"Malformed FASTQ record #{record_index} for {header.strip()}: sequence and quality lengths differ"
+                )
             yield FastqRead(name=header.strip()[1:], sequence=sequence, quality=quality, qscore_method=qscore_method)

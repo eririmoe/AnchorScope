@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+from contextlib import contextmanager
 from math import isclose, log10
 import shutil
 import tempfile
@@ -16,9 +17,13 @@ from scfastq_qc.report import run_qc
 
 
 class SmokeTest(unittest.TestCase):
-    def _temporary_directory(self) -> tempfile.TemporaryDirectory[str]:
-        repo = Path(__file__).resolve().parents[1]
-        return tempfile.TemporaryDirectory(dir=repo)
+    @contextmanager
+    def _temporary_directory(self):
+        tmpdir = Path(tempfile.mkdtemp(prefix="test-work-"))
+        try:
+            yield str(tmpdir)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_run_qc_generates_report(self):
         repo = Path(__file__).resolve().parents[1]
@@ -34,20 +39,13 @@ class SmokeTest(unittest.TestCase):
             self.assertIn('max_read_length', data)
             self.assertIn('median_read_qscore', data)
             self.assertIn('structure_orientation_counts', data)
+            self.assertIn('qc_bucket_counts', data)
+            self.assertIn('rust_accelerator', data)
             report_html = (Path(tmpdir) / 'report.html').read_text(encoding='utf-8')
-            self.assertIn('Read length summary', report_html)
-            self.assertIn('Longest read', report_html)
-            self.assertIn('Median read Qscore', report_html)
-            self.assertIn('Reversed read ratio', report_html)
-            self.assertIn('Orientation', report_html)
-            hist_svg = (Path(tmpdir) / 'figures' / 'read_length_hist.svg').read_text(encoding='utf-8')
-            self.assertIn("font-size='12'", hist_svg)
-            base_q_svg = (Path(tmpdir) / 'figures' / 'mean_q_hist.svg').read_text(encoding='utf-8')
-            self.assertIn('Overall base quality distribution', base_q_svg)
-            self.assertIn('Base count', base_q_svg)
-            read_q_svg = (Path(tmpdir) / 'figures' / 'read_q_density.svg').read_text(encoding='utf-8')
-            self.assertIn('Per-read Qscore density', read_q_svg)
-            self.assertIn('Probability density', read_q_svg)
+            self.assertIn('QC Verdicts', report_html)
+            self.assertIn('Yield And Quality', report_html)
+            self.assertIn('Structure And Failure Modes', report_html)
+            self.assertIn('<svg', report_html)
 
     def test_read_qscore_matches_error_rate_definition(self):
         read = FastqRead(name='mixed', sequence='AAAA', quality='I!I!')
@@ -173,6 +171,14 @@ class SmokeTest(unittest.TestCase):
         self.assertEqual(summary['structure_orientation_counts']['full_structure']['reversed'], 1)
         self.assertEqual(summary['reversed_read_ratio'], 0.5)
 
+    def test_run_qc_exports_read_level_csvs(self):
+        repo = Path(__file__).resolve().parents[1]
+        config = load_config(repo / 'examples' / 'config.json')
+        with self._temporary_directory() as tmpdir:
+            run_qc(str(repo / 'examples' / 'example.fastq'), config, tmpdir, export_csv=True)
+            self.assertTrue((Path(tmpdir) / 'read_details.csv').exists())
+            self.assertTrue((Path(tmpdir) / 'anchor_hits.csv').exists())
+
     @unittest.skipUnless(shutil.which('cargo'), 'cargo not available')
     def test_rust_engine_available_after_auto_build(self):
         engine = get_rust_anchor_engine()
@@ -198,6 +204,13 @@ class SmokeTest(unittest.TestCase):
         self.assertEqual(len(reads), 1)
         self.assertEqual(reads[0].sequence, 'ACGT')
         self.assertEqual(reads[0].quality, '!!!!')
+
+    def test_read_fastq_rejects_mismatched_sequence_and_quality_lengths(self):
+        with self._temporary_directory() as tmpdir:
+            fastq_path = Path(tmpdir) / 'bad.fastq'
+            fastq_path.write_text('@r1\nACGT\n+\n!!!\n', encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, 'sequence and quality lengths differ'):
+                list(read_fastq(fastq_path))
 
     def test_get_rust_anchor_engine_skips_rebuild_but_loads_existing_library(self):
         fake_engine = object()

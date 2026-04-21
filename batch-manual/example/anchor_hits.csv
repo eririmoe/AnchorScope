@@ -1,0 +1,7 @@
+Read ID,Read Length,Read Qscore,Structure Label,Is Reversed,Anchor Name,Start,End,Mismatches,Matched Sequence
+read1,26,40.00,full_structure,False,adapter_5p,0,8,0,ACGTACGT
+read1,26,40.00,full_structure,False,polyT,14,22,0,TTTTTTTT
+read2,25,39.00,full_structure,False,adapter_5p,0,8,0,ACGTACGT
+read2,25,39.00,full_structure,False,polyT,17,25,0,TTTTTTTT
+read3,25,37.00,missing_5p_anchor,False,polyT,10,25,0,TTTTTTTTTTTTTTT
+read4,20,40.00,missing_3p_anchor,False,adapter_5p,0,8,0,ACGTACGT

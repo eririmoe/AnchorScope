@@ -5,16 +5,16 @@ import logging
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from html import escape
-from math import ceil, exp, floor
+from math import ceil, floor
 from pathlib import Path
 from statistics import median
-from typing import Any, Callable
+from typing import Any
 
-from .anchors import AnchorHit, find_anchor_hits, prepare_anchors, reverse_complement
+from .anchors import AnchorHit, find_anchor_hits, get_rust_status, prepare_anchors, reverse_complement
 from .classify import classify_best_orientation
-from .config import AppConfig
-from .export import export_summary_to_csv, export_structure_classification_to_csv
-from .fastq import read_fastq
+from .config import AppConfig, ThresholdConfig
+from .export import export_anchor_hits_to_csv, export_read_results_to_csv, export_structure_classification_to_csv, export_summary_to_csv
+from .fastq import FastqRead, read_fastq
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,12 @@ class ReadResult:
     is_reversed: bool
     order_valid: bool
     hits: list[AnchorHit]
+    qc_bucket: str
+    qc_flags: list[str]
+    five_prime_offset: float | None
+    three_prime_offset: float | None
+    n_fraction: float
+    invalid_base_fraction: float
 
 
 def compute_n50(lengths: list[int]) -> int:
@@ -46,733 +52,394 @@ def _write_text(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def _format_num(value: float, decimals: int = 1) -> str:
+    if float(value).is_integer():
+        return f"{int(value):,}"
+    return f"{value:,.{decimals}f}"
+
+
+def _best_hits_by_anchor(hits: list[AnchorHit]) -> dict[str, AnchorHit]:
+    best_hits: dict[str, AnchorHit] = {}
+    for hit in hits:
+        current = best_hits.get(hit.anchor_name)
+        if current is None or (hit.mismatches, hit.start, hit.end) < (current.mismatches, current.start, current.end):
+            best_hits[hit.anchor_name] = hit
+    return best_hits
+
+
+def _compute_terminal_offsets(best_hits: dict[str, AnchorHit], expected_order: list[str], read_length: int) -> tuple[float | None, float | None]:
+    if read_length <= 0 or not expected_order:
+        return None, None
+    first = best_hits.get(expected_order[0])
+    last = best_hits.get(expected_order[-1])
+    five_prime = first.start / read_length if first else None
+    three_prime = (read_length - last.end) / read_length if last else None
+    return five_prime, three_prime
+
+
+def _derive_qc_flags(
+    read: FastqRead,
+    structure_label: str,
+    five_prime_offset: float | None,
+    three_prime_offset: float | None,
+    config: AppConfig,
+    hits: list[AnchorHit],
+) -> list[str]:
+    flags: list[str] = []
+    t = config.thresholds
+    if read.length == 0:
+        flags.append("empty_read")
+    if read.length < t.long_read_min_bp:
+        flags.append("too_short")
+    if read.read_qscore < t.long_read_min_q:
+        flags.append("low_read_q")
+    if read.n_fraction >= t.high_n_fraction:
+        flags.append("high_n")
+    if read.invalid_base_fraction > 0:
+        flags.append("invalid_bases")
+
+    structure_map = {
+        "no_anchor_detected": "no_anchor",
+        "missing_5p_anchor": "missing_5p",
+        "missing_3p_anchor": "missing_3p",
+        "anchor_order_invalid": "order_invalid",
+        "duplicated_anchor": "multi_anchor",
+        "internal_5p_anchor": "internal_adapter",
+        "internal_3p_anchor": "internal_adapter",
+        "concatemer_candidate": "concatemer_candidate",
+    }
+    mapped = structure_map.get(structure_label)
+    if mapped:
+        flags.append(mapped)
+    if five_prime_offset is not None and five_prime_offset > t.terminal_anchor_max_offset:
+        flags.append("five_prime_truncated")
+    if three_prime_offset is not None and three_prime_offset > t.terminal_anchor_max_offset:
+        flags.append("three_prime_truncated")
+    if len(hits) > max(len(config.structure.expected_order), 1) * 2:
+        flags.append("dense_anchor_hits")
+    return list(dict.fromkeys(flags))
+
+
+def _primary_qc_bucket(flags: list[str]) -> str:
+    priority = [
+        "empty_read", "too_short", "low_read_q", "invalid_bases", "high_n", "no_anchor",
+        "internal_adapter", "concatemer_candidate", "multi_anchor", "order_invalid",
+        "missing_5p", "missing_3p", "five_prime_truncated", "three_prime_truncated", "dense_anchor_hits",
+    ]
+    for item in priority:
+        if item in flags:
+            return item
+    return "pass"
+
+
+def _serialize_read_result(result: ReadResult) -> dict[str, Any]:
+    return {
+        "read_id": result.read_id,
+        "length": result.length,
+        "read_qscore": result.read_qscore,
+        "structure_label": result.structure_label,
+        "qc_bucket": result.qc_bucket,
+        "qc_flags": result.qc_flags,
+        "is_reversed": result.is_reversed,
+        "order_valid": result.order_valid,
+        "anchor_count": len(result.hits),
+        "five_prime_offset": result.five_prime_offset,
+        "three_prime_offset": result.three_prime_offset,
+        "n_fraction": result.n_fraction,
+        "invalid_base_fraction": result.invalid_base_fraction,
+        "hits": [{"anchor_name": hit.anchor_name, "start": hit.start, "end": hit.end, "mismatches": hit.mismatches, "matched_sequence": hit.matched_sequence} for hit in result.hits],
+    }
+
+
+def _verdict(value: float, warn: float, fail: float, higher_is_better: bool) -> str:
+    if higher_is_better:
+        if value < fail:
+            return "fail"
+        if value < warn:
+            return "warn"
+        return "pass"
+    if value > fail:
+        return "fail"
+    if value > warn:
+        return "warn"
+    return "pass"
+
+
+def _build_qc_verdicts(summary: dict[str, Any], t: ThresholdConfig) -> dict[str, dict[str, Any]]:
+    verdicts = {
+        "long_high_quality_ratio": {"label": "Long high-quality ratio", "value": summary["long_high_quality_ratio"], "status": _verdict(summary["long_high_quality_ratio"], t.warn_long_high_quality_ratio, t.fail_long_high_quality_ratio, True)},
+        "correct_anchor_order_ratio": {"label": "Correct anchor order ratio", "value": summary["correct_anchor_order_ratio"], "status": _verdict(summary["correct_anchor_order_ratio"], t.warn_correct_anchor_order_ratio, t.fail_correct_anchor_order_ratio, True)},
+        "no_anchor_ratio": {"label": "No-anchor ratio", "value": summary["qc_bucket_ratios"].get("no_anchor", 0.0), "status": _verdict(summary["qc_bucket_ratios"].get("no_anchor", 0.0), t.warn_no_anchor_ratio, t.fail_no_anchor_ratio, False)},
+        "reversed_read_ratio": {"label": "Reversed read ratio", "value": summary["reversed_read_ratio"], "status": _verdict(summary["reversed_read_ratio"], t.warn_reversed_read_ratio, t.fail_reversed_read_ratio, False)},
+        "high_n_read_ratio": {"label": "High-N read ratio", "value": summary["high_n_read_ratio"], "status": _verdict(summary["high_n_read_ratio"], t.warn_high_n_ratio, t.fail_high_n_ratio, False)},
+    }
+    overall = "pass"
+    if any(item["status"] == "fail" for item in verdicts.values()):
+        overall = "fail"
+    elif any(item["status"] == "warn" for item in verdicts.values()):
+        overall = "warn"
+    verdicts["overall"] = {"label": "Overall QC", "value": None, "status": overall}
+    return verdicts
+
+
 def _scale(value: float, lower: float, upper: float, span: float) -> float:
     if upper <= lower:
         return 0.0
     return ((value - lower) / (upper - lower)) * span
 
 
-def _format_tick(value: float) -> str:
-    if abs(value) >= 1000:
-        return f"{value:,.0f}"
-    if float(value).is_integer():
-        return str(int(value))
-    return f"{value:.2f}".rstrip("0").rstrip(".")
+def _svg_wrapper(title: str, body: str, width: int = 780, height: int = 320) -> str:
+    return f"<svg xmlns='http://www.w3.org/2000/svg' width='{width}' height='{height}' viewBox='0 0 {width} {height}'><style>text{{font-family:IBM Plex Sans,Segoe UI,sans-serif;fill:#12232f}}.grid{{stroke:#d7e0e6;stroke-width:1}}.axis{{stroke:#304252;stroke-width:1}}.bar{{rx:5;ry:5}}</style><text x='18' y='28' font-size='20' font-weight='700'>{escape(title)}</text>{body}</svg>"
 
 
-def _format_int_tick(value: float) -> str:
-    return f"{int(round(value)):,}"
-
-
-def _format_percent_tick(value: float) -> str:
-    return f"{value * 100:.0f}%"
-
-
-def _integer_tick_count(max_value: float, cap: int = 5) -> int:
-    rounded = int(round(max_value))
-    return max(1, min(rounded, cap))
-
-
-def _axis_ticks(
-    left: int,
-    top: int,
-    width: int,
-    height: int,
-    x_min: float,
-    x_max: float,
-    y_min: float,
-    y_max: float,
-    x_ticks: int = 5,
-    y_ticks: int = 5,
-    x_formatter: Callable[[float], str] | None = None,
-    y_formatter: Callable[[float], str] | None = None,
-    show_x_grid: bool = True,
-    show_x_ticks: bool = True,
-    show_x_labels: bool = True,
-    show_y_grid: bool = True,
-    show_y_ticks: bool = True,
-    show_y_labels: bool = True,
-) -> list[str]:
-    parts: list[str] = []
-    bottom = top + height
-    right = left + width
-    x_span = x_max - x_min if x_max != x_min else 1
-    y_span = y_max - y_min if y_max != y_min else 1
-    x_formatter = x_formatter or _format_tick
-    y_formatter = y_formatter or _format_tick
-
-    for idx in range(x_ticks + 1):
-        fraction = idx / x_ticks if x_ticks else 0
-        x = left + fraction * width
-        value = x_min + fraction * x_span
-        if show_x_grid:
-            parts.append(f"<line class='grid' x1='{x:.2f}' y1='{top}' x2='{x:.2f}' y2='{bottom}'/>")
-        if show_x_ticks:
-            parts.append(f"<line class='axis-tick' x1='{x:.2f}' y1='{bottom}' x2='{x:.2f}' y2='{bottom + 6}'/>")
-        if show_x_labels:
-            parts.append(
-                f"<text x='{x:.2f}' y='{bottom + 24}' text-anchor='middle' font-size='12'>{escape(x_formatter(value))}</text>"
-            )
-
-    for idx in range(y_ticks + 1):
-        fraction = idx / y_ticks if y_ticks else 0
-        y = bottom - fraction * height
-        value = y_min + fraction * y_span
-        if show_y_grid:
-            parts.append(f"<line class='grid' x1='{left}' y1='{y:.2f}' x2='{right}' y2='{y:.2f}'/>")
-        if show_y_ticks:
-            parts.append(f"<line class='axis-tick' x1='{left - 6}' y1='{y:.2f}' x2='{left}' y2='{y:.2f}'/>")
-        if show_y_labels:
-            parts.append(
-                f"<text x='{left - 10}' y='{y + 4:.2f}' text-anchor='end' font-size='12'>{escape(y_formatter(value))}</text>"
-            )
-    return parts
-
-
-def _centered_histogram_x_ticks(
-    left: int,
-    top: int,
-    width: int,
-    height: int,
-    lower: float,
-    upper: float,
-    bins: int,
-    formatter: Callable[[float], str],
-    label_count: int = 6,
-) -> list[str]:
-    parts: list[str] = []
-    bottom = top + height
-    if bins <= 0:
-        return parts
-    bar_w = width / bins
-    step = (upper - lower) / bins
-    tick_bins: list[int] = []
-    target_count = min(label_count, bins)
-    for idx in range(target_count):
-        if target_count == 1:
-            bin_idx = bins // 2
-        else:
-            bin_idx = round(idx * (bins - 1) / (target_count - 1))
-        if bin_idx not in tick_bins:
-            tick_bins.append(bin_idx)
-    for idx in tick_bins:
-        x = left + (idx + 0.5) * bar_w
-        value = lower + (idx + 0.5) * step
-        parts.append(f"<line class='axis-tick' x1='{x:.2f}' y1='{bottom}' x2='{x:.2f}' y2='{bottom + 6}'/>")
-        parts.append(
-            f"<text x='{x:.2f}' y='{bottom + 24}' text-anchor='middle' font-size='12'>{escape(formatter(value))}</text>"
-        )
-    return parts
-
-
-def _svg_wrapper(title: str, body: str, width: int = 800, height: int = 400) -> str:
-    return f"""<svg xmlns='http://www.w3.org/2000/svg' width='{width}' height='{height}' viewBox='0 0 {width} {height}'>
-<style>
-text {{ font-family: Arial, sans-serif; fill: #222; }}
-.axis {{ stroke: #333; stroke-width: 1; }}
-.axis-tick {{ stroke: #333; stroke-width: 1; }}
-.grid {{ stroke: #ddd; stroke-width: 1; }}
-</style>
-<text x='20' y='30' font-size='22' font-weight='bold'>{escape(title)}</text>
-{body}
-</svg>"""
-
-
-def _histogram(
-    values: list[float],
-    title: str,
-    xlabel: str,
-    bins: int = 20,
-    color: str = "#4C78A8",
-    ylabel: str = "Count",
-) -> str:
-    width, height = 800, 400
-    left, right, top, bottom = 70, 30, 60, 60
-    plot_w, plot_h = width - left - right, height - top - bottom
+def _histogram(values: list[float], title: str, xlabel: str, color: str = "#2364aa", bins: int = 20) -> str:
     if not values:
-        return _svg_wrapper(title, "<text x='70' y='120'>No data</text>")
+        return _svg_wrapper(title, "<text x='40' y='90'>No data</text>")
+    width, height = 780, 320
+    left, top, right, bottom = 60, 48, 20, 45
+    plot_w, plot_h = width - left - right, height - top - bottom
     lower, upper = min(values), max(values)
     if lower == upper:
         lower -= 0.5
         upper += 0.5
     step = (upper - lower) / bins
     counts = [0] * bins
-    x_formatter = _format_int_tick if all(float(value).is_integer() for value in values) else _format_tick
     for value in values:
-        idx = min(bins - 1, int((value - lower) / step))
-        counts[idx] += 1
+        counts[min(bins - 1, int((value - lower) / step))] += 1
     max_count = max(counts) or 1
-    parts = _axis_ticks(
-        left,
-        top,
-        plot_w,
-        plot_h,
-        lower,
-        upper,
-        0,
-        max_count,
-        y_ticks=_integer_tick_count(max_count),
-        y_formatter=_format_int_tick,
-        show_x_grid=False,
-        show_x_ticks=False,
-        show_x_labels=False,
-    )
-    parts.extend(_centered_histogram_x_ticks(left, top, plot_w, plot_h, lower, upper, bins, x_formatter))
-    parts.extend(
-        [
-            f"<line class='axis' x1='{left}' y1='{height-bottom}' x2='{width-right}' y2='{height-bottom}'/>",
-            f"<line class='axis' x1='{left}' y1='{top}' x2='{left}' y2='{height-bottom}'/>",
-        ]
-    )
+    parts: list[str] = []
+    for idx in range(6):
+        y = top + plot_h - (idx / 5) * plot_h
+        parts.append(f"<line class='grid' x1='{left}' y1='{y:.2f}' x2='{left+plot_w}' y2='{y:.2f}'/>")
+        parts.append(f"<text x='{left-8}' y='{y+4:.2f}' text-anchor='end' font-size='11'>{_format_num((idx/5)*max_count, 0)}</text>")
     bar_w = plot_w / bins
     for idx, count in enumerate(counts):
         bar_h = (count / max_count) * plot_h
         x = left + idx * bar_w
-        y = height - bottom - bar_h
-        parts.append(f"<rect x='{x:.2f}' y='{y:.2f}' width='{max(bar_w-1,1):.2f}' height='{bar_h:.2f}' fill='{color}'/>")
-    parts.append(f"<text x='{width/2:.0f}' y='{height-15}' text-anchor='middle'>{escape(xlabel)}</text>")
-    parts.append(
-        f"<text x='20' y='{height/2:.0f}' transform='rotate(-90 20,{height/2:.0f})' text-anchor='middle'>{escape(ylabel)}</text>"
-    )
+        y = top + plot_h - bar_h
+        parts.append(f"<rect class='bar' x='{x:.2f}' y='{y:.2f}' width='{max(bar_w-1,1):.2f}' height='{bar_h:.2f}' fill='{color}'/>")
+    parts.append(f"<line class='axis' x1='{left}' y1='{top+plot_h}' x2='{left+plot_w}' y2='{top+plot_h}'/>")
+    parts.append(f"<line class='axis' x1='{left}' y1='{top}' x2='{left}' y2='{top+plot_h}'/>")
+    parts.append(f"<text x='{width/2:.0f}' y='{height-12}' text-anchor='middle' font-size='12'>{escape(xlabel)}</text>")
     return _svg_wrapper(title, ''.join(parts), width, height)
 
 
-def _density_plot(
-    values: list[float],
-    title: str,
-    xlabel: str,
-    color: str = "#54A24B",
-    bin_width: float = 0.2,
-    smoothing_sigma: float = 0.8,
-) -> str:
-    width, height = 800, 400
-    left, right, top, bottom = 70, 30, 60, 60
-    plot_w, plot_h = width - left - right, height - top - bottom
+def _line_density(values: list[float], title: str, xlabel: str, color: str = "#2d8f85", bin_width: float = 0.2) -> str:
     if not values:
-        return _svg_wrapper(title, "<text x='70' y='120'>No data</text>")
-
+        return _svg_wrapper(title, "<text x='40' y='90'>No data</text>")
+    width, height = 780, 320
+    left, top, right, bottom = 60, 48, 20, 45
+    plot_w, plot_h = width - left - right, height - top - bottom
     lower, upper = min(values), max(values)
     if lower == upper:
         lower -= 0.5
         upper += 0.5
     lower = floor(lower) - 1
     upper = ceil(upper) + 1
-
-    x_formatter = _format_int_tick if all(float(value).is_integer() for value in values) else _format_tick
     bin_count = max(2, int(ceil((upper - lower) / bin_width)))
     counts = [0.0] * bin_count
     for value in values:
-        idx = min(bin_count - 1, max(0, int((value - lower) / bin_width)))
-        counts[idx] += 1.0
+        counts[min(bin_count - 1, max(0, int((value - lower) / bin_width)))] += 1
     densities = [count / (len(values) * bin_width) for count in counts]
-
-    sigma_bins = max(smoothing_sigma / bin_width, 1.0)
-    kernel_radius = max(1, int(round(3 * sigma_bins)))
-    kernel = [exp(-0.5 * (offset / sigma_bins) ** 2) for offset in range(-kernel_radius, kernel_radius + 1)]
-    kernel_sum = sum(kernel) or 1.0
-    kernel = [weight / kernel_sum for weight in kernel]
-
-    points: list[tuple[float, float]] = []
-    peak_density = 0.0
-    for idx in range(bin_count):
-        density = 0.0
-        for kernel_offset, weight in enumerate(kernel, start=-kernel_radius):
-            source_idx = idx + kernel_offset
-            if 0 <= source_idx < bin_count:
-                density += densities[source_idx] * weight
+    y_max = max(densities) * 1.1 if densities else 1.0
+    points = []
+    for idx, density in enumerate(densities):
         x_value = lower + (idx + 0.5) * bin_width
-        points.append((x_value, density))
-        peak_density = max(peak_density, density)
-
-    y_max = peak_density * 1.05 if peak_density > 0 else 1.0
-    parts = _axis_ticks(
-        left,
-        top,
-        plot_w,
-        plot_h,
-        lower,
-        upper,
-        0,
-        y_max,
-        x_formatter=x_formatter,
-    )
-    parts.extend(
-        [
-            f"<line class='axis' x1='{left}' y1='{height-bottom}' x2='{width-right}' y2='{height-bottom}'/>",
-            f"<line class='axis' x1='{left}' y1='{top}' x2='{left}' y2='{height-bottom}'/>",
-        ]
-    )
-    polyline_points = []
-    for x_value, density in points:
         x = left + _scale(x_value, lower, upper, plot_w)
-        y = height - bottom - _scale(density, 0, y_max, plot_h)
-        polyline_points.append(f"{x:.2f},{y:.2f}")
-    baseline_y = height - bottom
-    area_points = [f"{left:.2f},{baseline_y:.2f}", *polyline_points, f"{width-right:.2f},{baseline_y:.2f}"]
-    parts.append(f"<polygon points='{' '.join(area_points)}' fill='{color}' fill-opacity='0.18'/>")
-    parts.append(f"<polyline fill='none' stroke='{color}' stroke-width='2.5' points='{' '.join(polyline_points)}'/>")
-    parts.append(f"<text x='{width/2:.0f}' y='{height-15}' text-anchor='middle'>{escape(xlabel)}</text>")
-    parts.append(f"<text x='20' y='{height/2:.0f}' transform='rotate(-90 20,{height/2:.0f})' text-anchor='middle'>Probability density</text>")
-    return _svg_wrapper(title, ''.join(parts), width, height)
+        y = top + plot_h - _scale(density, 0, y_max, plot_h)
+        points.append(f"{x:.2f},{y:.2f}")
+    body = f"<line class='axis' x1='{left}' y1='{top+plot_h}' x2='{left+plot_w}' y2='{top+plot_h}'/><line class='axis' x1='{left}' y1='{top}' x2='{left}' y2='{top+plot_h}'/><polygon points='{left},{top+plot_h} {' '.join(points)} {left+plot_w},{top+plot_h}' fill='{color}' fill-opacity='0.16'/><polyline fill='none' stroke='{color}' stroke-width='2.5' points='{' '.join(points)}'/><text x='{width/2:.0f}' y='{height-12}' text-anchor='middle' font-size='12'>{escape(xlabel)}</text>"
+    return _svg_wrapper(title, body, width, height)
 
 
-def _cdf(values: list[int], title: str, xlabel: str, color: str = "#F58518") -> str:
-    width, height = 800, 400
-    left, right, top, bottom = 70, 30, 60, 60
-    plot_w, plot_h = width - left - right, height - top - bottom
-    if not values:
-        return _svg_wrapper(title, "<text x='70' y='120'>No data</text>")
-    sorted_values = sorted(values)
-    min_v, max_v = sorted_values[0], sorted_values[-1]
-    parts = _axis_ticks(
-        left,
-        top,
-        plot_w,
-        plot_h,
-        min_v,
-        max_v if max_v != min_v else min_v + 1,
-        0,
-        1,
-        x_formatter=_format_int_tick,
-    )
-    parts.extend(
-        [
-            f"<line class='axis' x1='{left}' y1='{height-bottom}' x2='{width-right}' y2='{height-bottom}'/>",
-            f"<line class='axis' x1='{left}' y1='{top}' x2='{left}' y2='{height-bottom}'/>",
-        ]
-    )
-    pts = []
-    for idx, value in enumerate(sorted_values):
-        x = left + _scale(value, min_v, max_v if max_v != min_v else min_v + 1, plot_w)
-        y = height - bottom - ((idx + 1) / len(sorted_values)) * plot_h
-        pts.append(f"{x:.2f},{y:.2f}")
-    parts.append(f"<polyline fill='none' stroke='{color}' stroke-width='2' points='{' '.join(pts)}'/>")
-    parts.append(f"<text x='{width/2:.0f}' y='{height-15}' text-anchor='middle'>{escape(xlabel)}</text>")
-    parts.append(f"<text x='20' y='{height/2:.0f}' transform='rotate(-90 20,{height/2:.0f})' text-anchor='middle'>Cumulative fraction</text>")
-    return _svg_wrapper(title, ''.join(parts), width, height)
-
-
-def _bar_chart(
-    items: list[tuple[str, float]],
-    title: str,
-    ylabel: str,
-    color: str = "#E45756",
-    y_max: float | None = None,
-    y_formatter: Callable[[float], str] | None = None,
-    value_formatter: Callable[[float], str] | None = None,
-) -> str:
-    width, height = 860, 500
-    left, right, top, bottom = 80, 40, 70, 130
-    plot_w, plot_h = width - left - right, height - top - bottom
+def _bar_chart(items: list[tuple[str, float]], title: str, ylabel: str, color: str = "#d1495b", percent: bool = False) -> str:
     if not items:
-        return _svg_wrapper(title, "<text x='70' y='120'>No data</text>", width, height)
-    if y_max is None:
-        y_max = max(value for _, value in items) or 1
-    y_formatter = y_formatter or _format_int_tick
-    value_formatter = value_formatter or y_formatter
-    parts = _axis_ticks(
-        left,
-        top,
-        plot_w,
-        plot_h,
-        0,
-        max(len(items), 1),
-        0,
-        y_max,
-        y_ticks=_integer_tick_count(y_max) if y_formatter is _format_int_tick else 5,
-        y_formatter=y_formatter,
-        show_x_grid=False,
-        show_x_ticks=False,
-        show_x_labels=False,
-    )
-    parts.extend(
-        [
-            f"<line class='axis' x1='{left}' y1='{height-bottom}' x2='{width-right}' y2='{height-bottom}'/>",
-            f"<line class='axis' x1='{left}' y1='{top}' x2='{left}' y2='{height-bottom}'/>",
-        ]
-    )
+        return _svg_wrapper(title, "<text x='40' y='90'>No data</text>", 820, 360)
+    width, height = 820, 360
+    left, top, right, bottom = 70, 52, 24, 96
+    plot_w, plot_h = width - left - right, height - top - bottom
+    y_max = 1.0 if percent else max(value for _, value in items) or 1.0
+    parts = [f"<line class='axis' x1='{left}' y1='{top+plot_h}' x2='{left+plot_w}' y2='{top+plot_h}'/>", f"<line class='axis' x1='{left}' y1='{top}' x2='{left}' y2='{top+plot_h}'/>"]
     slot_w = plot_w / len(items)
-    bar_w = min(slot_w * 0.55, 140)
+    bar_w = min(slot_w * 0.58, 120)
     for idx, (label, value) in enumerate(items):
-        height_px = (value / y_max) * plot_h if y_max else 0
+        bar_h = (value / y_max) * plot_h if y_max else 0
         x = left + idx * slot_w + (slot_w - bar_w) / 2
-        y = height - bottom - height_px
-        parts.append(f"<rect x='{x:.2f}' y='{y:.2f}' width='{bar_w:.2f}' height='{height_px:.2f}' fill='{color}' rx='4' ry='4'/>")
+        y = top + plot_h - bar_h
+        disp = f"{value:.1%}" if percent else _format_num(value, 0)
         tx = left + idx * slot_w + slot_w / 2
-        parts.append(f"<text x='{tx:.2f}' y='{height-bottom+28}' text-anchor='end' transform='rotate(-28 {tx:.2f},{height-bottom+28})'>{escape(label)}</text>")
-        parts.append(f"<text x='{tx:.2f}' y='{y-8:.2f}' text-anchor='middle' font-size='12'>{escape(value_formatter(value))}</text>")
-    parts.append(f"<text x='20' y='{height/2:.0f}' transform='rotate(-90 20,{height/2:.0f})' text-anchor='middle'>{escape(ylabel)}</text>")
+        parts.append(f"<rect class='bar' x='{x:.2f}' y='{y:.2f}' width='{bar_w:.2f}' height='{bar_h:.2f}' fill='{color}'/>")
+        parts.append(f"<text x='{tx:.2f}' y='{y-8:.2f}' text-anchor='middle' font-size='11'>{escape(disp)}</text>")
+        parts.append(f"<text x='{tx:.2f}' y='{top+plot_h+22:.2f}' text-anchor='end' transform='rotate(-24 {tx:.2f},{top+plot_h+22:.2f})' font-size='11'>{escape(label)}</text>")
+    parts.append(f"<text x='20' y='{height/2:.0f}' transform='rotate(-90 20,{height/2:.0f})' text-anchor='middle' font-size='12'>{escape(ylabel)}</text>")
     return _svg_wrapper(title, ''.join(parts), width, height)
 
 
 def _scatter(lengths: list[int], read_qscores: list[float], title: str) -> str:
-    width, height = 800, 420
-    left, right, top, bottom = 70, 30, 60, 60
+    width, height = 780, 320
+    left, top, right, bottom = 60, 48, 20, 45
     plot_w, plot_h = width - left - right, height - top - bottom
-    if lengths and read_qscores:
-        min_x, max_x = min(lengths), max(lengths)
-        min_y, max_y = min(read_qscores), max(read_qscores)
-        parts = _axis_ticks(
-            left,
-            top,
-            plot_w,
-            plot_h,
-            min_x,
-            max_x if max_x != min_x else min_x + 1,
-            min_y,
-            max_y if max_y != min_y else min_y + 1,
-            x_formatter=_format_int_tick,
-        )
-        parts.extend(
-            [
-                f"<line class='axis' x1='{left}' y1='{height-bottom}' x2='{width-right}' y2='{height-bottom}'/>",
-                f"<line class='axis' x1='{left}' y1='{top}' x2='{left}' y2='{height-bottom}'/>",
-            ]
-        )
-        for xval, yval in zip(lengths, read_qscores):
-            x = left + _scale(xval, min_x, max_x if max_x != min_x else min_x + 1, plot_w)
-            y = height - bottom - _scale(yval, min_y, max_y if max_y != min_y else min_y + 1, plot_h)
-            parts.append(f"<circle cx='{x:.2f}' cy='{y:.2f}' r='3' fill='#54A24B' fill-opacity='0.55'/>")
-    else:
-        parts = [
-            f"<line class='axis' x1='{left}' y1='{height-bottom}' x2='{width-right}' y2='{height-bottom}'/>",
-            f"<line class='axis' x1='{left}' y1='{top}' x2='{left}' y2='{height-bottom}'/>",
-        ]
-    parts.append(f"<text x='{width/2:.0f}' y='{height-15}' text-anchor='middle'>Read length (bp)</text>")
-    parts.append(f"<text x='20' y='{height/2:.0f}' transform='rotate(-90 20,{height/2:.0f})' text-anchor='middle'>Read Qscore</text>")
+    if not lengths or not read_qscores:
+        return _svg_wrapper(title, "<text x='40' y='90'>No data</text>")
+    min_x, max_x = min(lengths), max(lengths)
+    min_y, max_y = min(read_qscores), max(read_qscores)
+    if min_x == max_x:
+        max_x += 1
+    if min_y == max_y:
+        max_y += 1
+    parts = [f"<line class='axis' x1='{left}' y1='{top+plot_h}' x2='{left+plot_w}' y2='{top+plot_h}'/>", f"<line class='axis' x1='{left}' y1='{top}' x2='{left}' y2='{top+plot_h}'/>"]
+    for x_value, y_value in zip(lengths, read_qscores):
+        x = left + _scale(x_value, min_x, max_x, plot_w)
+        y = top + plot_h - _scale(y_value, min_y, max_y, plot_h)
+        parts.append(f"<circle cx='{x:.2f}' cy='{y:.2f}' r='3' fill='#2d8f85' fill-opacity='0.58'/>")
+    parts.append(f"<text x='{width/2:.0f}' y='{height-12}' text-anchor='middle' font-size='12'>Read length (bp)</text>")
+    parts.append(f"<text x='20' y='{height/2:.0f}' transform='rotate(-90 20,{height/2:.0f})' text-anchor='middle' font-size='12'>Read Qscore</text>")
     return _svg_wrapper(title, ''.join(parts), width, height)
 
 
-def _multi_hist(distributions: dict[str, list[float]], title: str) -> str:
-    width, height = 800, 420
-    left, right, top, bottom = 70, 30, 60, 60
-    plot_w, plot_h = width - left - right, height - top - bottom
-    colors = ["#E45756", "#4C78A8", "#54A24B", "#F58518", "#B279A2"]
-    all_values = [value for values in distributions.values() for value in values]
-    if not all_values:
-        return _svg_wrapper(title, "<text x='70' y='120'>No data</text>", width, height)
-    lower, upper = min(all_values), max(all_values)
-    bins = 25
-    step = (upper - lower) / bins if upper != lower else 1
-    max_count = 1
-    counts_by_series: list[tuple[str, list[int]]] = []
-    for name, values in distributions.items():
-        counts = [0] * bins
-        for value in values:
-            bin_idx = min(bins - 1, int((value - lower) / step))
-            counts[bin_idx] += 1
-        max_count = max(max_count, max(counts) if counts else 0)
-        counts_by_series.append((name, counts))
-    parts = _axis_ticks(
-        left,
-        top,
-        plot_w,
-        plot_h,
-        lower,
-        upper if upper != lower else lower + 1,
-        0,
-        max_count,
-        y_ticks=_integer_tick_count(max_count),
-        y_formatter=_format_int_tick,
-    )
-    parts.extend(
-        [
-            f"<line class='axis' x1='{left}' y1='{height-bottom}' x2='{width-right}' y2='{height-bottom}'/>",
-            f"<line class='axis' x1='{left}' y1='{top}' x2='{left}' y2='{height-bottom}'/>",
-        ]
-    )
-    series_points: list[tuple[str, str]] = []
-    for idx, (name, counts) in enumerate(counts_by_series):
-        points = []
-        for b_idx, count in enumerate(counts):
-            x = left + (b_idx / (bins - 1 if bins > 1 else 1)) * plot_w
-            y = height - bottom - (count / max_count) * plot_h
-            points.append(f"{x:.2f},{y:.2f}")
-        series_points.append((name, f"<polyline fill='none' stroke='{colors[idx % len(colors)]}' stroke-width='2' points='{' '.join(points)}'/>") )
-    legend_y = top
-    for idx, (name, polyline) in enumerate(series_points):
-        parts.append(polyline)
-        parts.append(f"<rect x='{width-right-180}' y='{legend_y + idx*22 - 10}' width='14' height='14' fill='{colors[idx % len(colors)]}'/>")
-        parts.append(f"<text x='{width-right-160}' y='{legend_y + idx*22 + 2}'>{escape(name)}</text>")
-    parts.append(f"<text x='{width/2:.0f}' y='{height-15}' text-anchor='middle'>Relative read position</text>")
-    parts.append(f"<text x='20' y='{height/2:.0f}' transform='rotate(-90 20,{height/2:.0f})' text-anchor='middle'>Hit count</text>")
-    return _svg_wrapper(title, ''.join(parts), width, height)
-
-
-def _heatmap(read_results: list[ReadResult], max_reads: int) -> str:
-    width, height = 950, 500
-    left, right, top, bottom = 70, 30, 60, 50
+def _heatmap(read_results: list[ReadResult], title: str, max_reads: int) -> str:
+    width, height = 900, 360
+    left, top, right, bottom = 60, 48, 20, 36
     plot_w, plot_h = width - left - right, height - top - bottom
     sampled = read_results[:max_reads]
-    row_h = max(1, plot_h / max(len(sampled), 1))
+    if not sampled:
+        return _svg_wrapper(title, "<text x='40' y='90'>No data</text>", width, height)
+    row_h = max(1, plot_h / len(sampled))
     col_w = plot_w / 100
-    parts = _axis_ticks(
-        left,
-        top,
-        plot_w,
-        plot_h,
-        0,
-        100,
-        0,
-        len(sampled) if sampled else 1,
-        y_ticks=_integer_tick_count(len(sampled) if sampled else 1),
-        y_formatter=_format_int_tick,
-    )
+    palette = {"pass": "#2d8f85", "too_short": "#d1495b", "low_read_q": "#d97706", "no_anchor": "#8d99ae"}
+    parts = [f"<line class='axis' x1='{left}' y1='{top+plot_h}' x2='{left+plot_w}' y2='{top+plot_h}'/>"]
     for row_idx, result in enumerate(sampled):
         y = top + row_idx * row_h
-        for col_idx in range(100):
-            parts.append(f"<rect x='{left + col_idx * col_w:.2f}' y='{y:.2f}' width='{col_w:.2f}' height='{row_h:.2f}' fill='#f5f5f5'/>")
-        if result.length > 0:
-            for hit in result.hits:
-                start = min(99, int((hit.start / result.length) * 100))
-                end = min(100, max(start + 1, int((hit.end / result.length) * 100)))
-                for col_idx in range(start, end):
-                    parts.append(f"<rect x='{left + col_idx * col_w:.2f}' y='{y:.2f}' width='{col_w:.2f}' height='{row_h:.2f}' fill='#4C78A8'/>")
-    parts.append(f"<line class='axis' x1='{left}' y1='{height-bottom}' x2='{width-right}' y2='{height-bottom}'/>")
-    parts.append(f"<text x='{width/2:.0f}' y='{height-15}' text-anchor='middle'>Normalized read position</text>")
-    parts.append(f"<text x='20' y='{height/2:.0f}' transform='rotate(-90 20,{height/2:.0f})' text-anchor='middle'>Reads</text>")
-    return _svg_wrapper("Read structure heatmap (anchor occupancy)", ''.join(parts), width, height)
+        base = palette.get(result.qc_bucket, "#e6eef3")
+        parts.append(f"<rect x='{left}' y='{y:.2f}' width='{plot_w}' height='{row_h:.2f}' fill='{base}' fill-opacity='0.12'/>")
+        for hit in result.hits:
+            if result.length <= 0:
+                continue
+            start = min(99, int((hit.start / result.length) * 100))
+            end = min(100, max(start + 1, int((hit.end / result.length) * 100)))
+            parts.append(f"<rect x='{left + start*col_w:.2f}' y='{y:.2f}' width='{(end-start)*col_w:.2f}' height='{row_h:.2f}' fill='#2364aa'/>")
+    parts.append(f"<text x='{width/2:.0f}' y='{height-10}' text-anchor='middle' font-size='12'>Normalized read position</text>")
+    return _svg_wrapper(title, ''.join(parts), width, height)
+
+
+def _status_pill(status: str) -> str:
+    return f"<span class='status-pill status-{escape(status)}'>{escape(status.upper())}</span>"
 
 
 def run_qc(fastq_path: str, config: AppConfig, outdir: str, export_csv: bool = False) -> dict[str, Any]:
-    """运行QC分析并生成报告
-    
-    Args:
-        fastq_path: FASTQ文件路径
-        config: 配置对象
-        outdir: 输出目录
-        export_csv: 是否导出CSV文件
-        
-    Returns:
-        包含QC分析结果的摘要字典
-    """
-    logger.info(f"Starting QC analysis for {fastq_path}")
-    
     out_path = Path(outdir)
-    fig_dir = out_path / "figures"
-    fig_dir.mkdir(parents=True, exist_ok=True)
-
+    out_path.mkdir(parents=True, exist_ok=True)
     prepared_anchors = prepare_anchors(config.anchors)
-    logger.info(f"Prepared {len(prepared_anchors)} anchors")
-    heatmap_reads: list[ReadResult] = []
-    base_qscores: list[float] = []
+
     lengths: list[int] = []
+    base_qscores: list[float] = []
     read_qscores: list[float] = []
+    read_results: list[ReadResult] = []
     anchor_counts: Counter[str] = Counter()
+    anchor_best_mismatches: dict[str, list[int]] = defaultdict(list)
+    anchor_hit_counts: dict[str, list[int]] = defaultdict(list)
     anchor_positions: dict[str, list[float]] = defaultdict(list)
     structure_counts: Counter[str] = Counter()
     structure_orientation_counts: Counter[tuple[str, str]] = Counter()
-    long_high_quality = 0
-    order_valid_count = 0
-    reversed_read_count = 0
-    total_reads = 0
-    total_bases = 0
+    qc_bucket_counts: Counter[str] = Counter()
+    total_reads = total_bases = long_high_quality = order_valid_count = reversed_read_count = 0
+    five_prime_truncation_count = three_prime_truncation_count = high_n_read_count = invalid_base_read_count = 0
 
     for read in read_fastq(fastq_path, qscore_method=config.qscore_method):
         total_reads += 1
         total_bases += read.length
-        if total_reads % 10000 == 0:
-            logger.debug(f"Processed {total_reads} reads")
-        forward_hits = find_anchor_hits(read.sequence, prepared_anchors)
-        reverse_hits = find_anchor_hits(reverse_complement(read.sequence), prepared_anchors)
-        structure, hits = classify_best_orientation(forward_hits, reverse_hits, config.structure.expected_order)
-        if len(heatmap_reads) < config.thresholds.heatmap_max_reads:
-            heatmap_reads.append(
-                ReadResult(read.name, read.length, read.read_qscore, structure.label, structure.is_reversed, structure.order_valid, hits)
-            )
         lengths.append(read.length)
         base_qscores.extend(float(q) for q in read.phred_scores)
         read_qscores.append(read.read_qscore)
+        forward_hits = find_anchor_hits(read.sequence, prepared_anchors)
+        reverse_hits = find_anchor_hits(reverse_complement(read.sequence), prepared_anchors)
+        structure, hits = classify_best_orientation(forward_hits, reverse_hits, config.structure.expected_order)
+        best_hits = _best_hits_by_anchor(hits)
+        five_prime_offset, three_prime_offset = _compute_terminal_offsets(best_hits, config.structure.expected_order, read.length)
+        qc_flags = _derive_qc_flags(read, structure.label, five_prime_offset, three_prime_offset, config, hits)
+        qc_bucket = _primary_qc_bucket(qc_flags)
+        result = ReadResult(read.name, read.length, read.read_qscore, structure.label, structure.is_reversed, structure.order_valid, hits, qc_bucket, qc_flags, five_prime_offset, three_prime_offset, read.n_fraction, read.invalid_base_fraction)
+        read_results.append(result)
         structure_counts[structure.label] += 1
         structure_orientation_counts[(structure.label, "reversed" if structure.is_reversed else "forward")] += 1
+        qc_bucket_counts[qc_bucket] += 1
         if structure.order_valid:
             order_valid_count += 1
         if structure.is_reversed:
             reversed_read_count += 1
         if read.length >= config.thresholds.long_read_min_bp and read.read_qscore >= config.thresholds.long_read_min_q:
             long_high_quality += 1
-        seen = set()
-        for hit in hits:
-            if hit.anchor_name not in seen:
-                anchor_counts[hit.anchor_name] += 1
-                seen.add(hit.anchor_name)
-            if read.length > 0:
-                anchor_positions[hit.anchor_name].append(hit.start / read.length)
+        if five_prime_offset is not None and five_prime_offset > config.thresholds.terminal_anchor_max_offset:
+            five_prime_truncation_count += 1
+        if three_prime_offset is not None and three_prime_offset > config.thresholds.terminal_anchor_max_offset:
+            three_prime_truncation_count += 1
+        if read.n_fraction >= config.thresholds.high_n_fraction:
+            high_n_read_count += 1
+        if read.invalid_base_fraction > 0:
+            invalid_base_read_count += 1
+        for name, hit in best_hits.items():
+            anchor_counts[name] += 1
+            anchor_best_mismatches[name].append(hit.mismatches)
+            anchor_positions[name].append(hit.start / read.length if read.length > 0 else 0.0)
+            anchor_hit_counts[name].append(sum(1 for item in hits if item.anchor_name == name))
 
+    anchor_quality_stats: dict[str, dict[str, float]] = {}
+    for anchor in config.anchors:
+        mismatch_values = anchor_best_mismatches.get(anchor.name, [])
+        count_values = anchor_hit_counts.get(anchor.name, [])
+        anchor_quality_stats[anchor.name] = {
+            "detection_ratio": (anchor_counts.get(anchor.name, 0) / total_reads) if total_reads else 0.0,
+            "mean_best_mismatches": (sum(mismatch_values) / len(mismatch_values)) if mismatch_values else 0.0,
+            "multi_hit_ratio": (sum(1 for value in count_values if value > 1) / len(count_values)) if count_values else 0.0,
+            "mean_hits_per_positive_read": (sum(count_values) / len(count_values)) if count_values else 0.0,
+        }
+
+    qc_bucket_counts_dict = dict(qc_bucket_counts.most_common())
     summary = {
         "sample_name": config.sample_name,
+        "fastq_path": str(fastq_path),
         "total_reads": total_reads,
         "total_bases": total_bases,
-        "mean_read_length": (total_bases / total_reads) if total_reads else 0,
+        "mean_read_length": (total_bases / total_reads) if total_reads else 0.0,
         "median_read_length": median(lengths) if lengths else 0,
         "n50": compute_n50(lengths),
         "min_read_length": min(lengths) if lengths else 0,
         "max_read_length": max(lengths) if lengths else 0,
-        "median_read_qscore": median(read_qscores) if read_qscores else 0,
+        "median_read_qscore": median(read_qscores) if read_qscores else 0.0,
         "long_high_quality_ratio": (long_high_quality / total_reads) if total_reads else 0.0,
         "reversed_read_ratio": (reversed_read_count / total_reads) if total_reads else 0.0,
-        "anchor_detection_ratio": {anchor.name: (anchor_counts.get(anchor.name, 0) / total_reads) if total_reads else 0.0 for anchor in config.anchors},
+        "five_prime_truncation_ratio": (five_prime_truncation_count / total_reads) if total_reads else 0.0,
+        "three_prime_truncation_ratio": (three_prime_truncation_count / total_reads) if total_reads else 0.0,
+        "high_n_read_ratio": (high_n_read_count / total_reads) if total_reads else 0.0,
+        "invalid_base_read_ratio": (invalid_base_read_count / total_reads) if total_reads else 0.0,
+        "anchor_detection_ratio": {anchor.name: anchor_quality_stats[anchor.name]["detection_ratio"] for anchor in config.anchors},
+        "anchor_quality_stats": anchor_quality_stats,
         "structure_counts": dict(structure_counts),
-        "structure_orientation_counts": {
-            label: {
-                orientation: structure_orientation_counts.get((label, orientation), 0)
-                for orientation in ("forward", "reversed")
-                if structure_orientation_counts.get((label, orientation), 0) > 0
-            }
-            for label in structure_counts
-        },
+        "structure_orientation_counts": {label: {orientation: structure_orientation_counts.get((label, orientation), 0) for orientation in ("forward", "reversed") if structure_orientation_counts.get((label, orientation), 0) > 0} for label in structure_counts},
         "correct_anchor_order_ratio": (order_valid_count / total_reads) if total_reads else 0.0,
+        "qc_bucket_counts": qc_bucket_counts_dict,
+        "qc_bucket_ratios": {bucket: (count / total_reads) if total_reads else 0.0 for bucket, count in qc_bucket_counts_dict.items()},
+        "rust_accelerator": get_rust_status(),
     }
+    summary["qc_verdicts"] = _build_qc_verdicts(summary, config.thresholds)
     _write_text(out_path / "summary.json", json.dumps(summary, indent=2))
-    logger.info(f"Summary saved to {out_path / 'summary.json'}")
-
-    # 导出CSV文件
     if export_csv:
-        logger.info("Exporting CSV files")
+        serialized = [_serialize_read_result(result) for result in read_results]
         export_summary_to_csv(summary, out_path / "summary.csv")
         export_structure_classification_to_csv(summary, out_path / "structure_classification.csv")
-        logger.info(f"CSV files exported to {out_path}")
-
-    _write_text(fig_dir / "read_length_hist.svg", _histogram([float(v) for v in lengths], "Read length distribution", "Read length (bp)"))
-    _write_text(fig_dir / "read_length_cdf.svg", _cdf(lengths, "Read length cumulative distribution", "Read length (bp)"))
-    _write_text(
-        fig_dir / "mean_q_hist.svg",
-        _histogram(
-            base_qscores,
-            "Overall base quality distribution",
-            "Phred quality score",
-            color="#54A24B",
-            ylabel="Base count",
-        ),
-    )
-    _write_text(fig_dir / "read_q_density.svg", _density_plot(read_qscores, "Per-read Qscore density", "Read Qscore", color="#4C78A8"))
-    _write_text(fig_dir / "length_q_scatter.svg", _scatter(lengths, read_qscores, "Read length vs read Qscore"))
-    _write_text(
-        fig_dir / "anchor_detect_bar.svg",
-        _bar_chart(
-            list(summary["anchor_detection_ratio"].items()),
-            "Anchor detection ratio",
-            "Fraction of reads",
-            y_max=1.0,
-            y_formatter=_format_percent_tick,
-            value_formatter=_format_percent_tick,
-        ),
-    )
-    _write_text(fig_dir / "anchor_position_density.svg", _multi_hist(anchor_positions, "Anchor relative position distribution"))
-    _write_text(
-        fig_dir / "structure_class_bar.svg",
-        _bar_chart([(k, float(v)) for k, v in structure_counts.items()], "Read structure classification", "Read count", color="#72B7B2"),
-    )
-    _write_text(fig_dir / "structure_heatmap.svg", _heatmap(heatmap_reads, config.thresholds.heatmap_max_reads))
-    _write_html_report(out_path / "report.html", summary)
-    logger.info(f"QC analysis completed. Output directory: {outdir}")
+        export_read_results_to_csv(serialized, out_path / "read_details.csv")
+        export_anchor_hits_to_csv(serialized, out_path / "anchor_hits.csv")
+    _write_html_report(out_path / "report.html", summary, read_results, lengths, base_qscores, read_qscores, anchor_positions, config.thresholds.heatmap_max_reads)
     return summary
 
 
-def _write_html_report(path: Path, summary: dict[str, Any]) -> None:
-    rows = "".join(
-        f"<tr><td>{escape(label)}</td><td>{escape(orientation)}</td><td>{count}</td></tr>"
-        for label, counts in sorted(
-            summary["structure_orientation_counts"].items(),
-            key=lambda item: sum(item[1].values()),
-            reverse=True,
-        )
-        for orientation, count in sorted(counts.items(), key=lambda item: item[1], reverse=True)
-    )
-    anchor_rows = "".join(
-        f"<tr><td>{escape(name)}</td><td>{ratio:.2%}</td></tr>"
-        for name, ratio in summary["anchor_detection_ratio"].items()
-    )
-    read_length_stats = [
-        ("N50", f"{summary['n50']:,} bp"),
-        ("Median length", f"{summary['median_read_length']:,} bp"),
-        ("Mean length", f"{summary['mean_read_length']:.1f} bp"),
-        ("Longest read", f"{summary['max_read_length']:,} bp"),
-        ("Shortest read", f"{summary['min_read_length']:,} bp"),
-    ]
-    read_length_stat_html = "".join(
-        f"<div class='stat-item'><div class='stat-label'>{escape(label)}</div><div class='stat-value'>{escape(value)}</div></div>"
-        for label, value in read_length_stats
-    )
-    html = f"""<!DOCTYPE html>
-<html lang='en'>
-<head>
-  <meta charset='utf-8'>
-  <title>scfastq-qc report - {escape(summary['sample_name'])}</title>
-  <style>
-    body {{ font-family: Arial, sans-serif; margin: 2rem auto; max-width: 1150px; color: #222; }}
-    h1, h2 {{ color: #1f4e79; }}
-    .cards {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; }}
-    .card {{ border: 1px solid #ddd; border-radius: 8px; padding: 1rem; background: #fafafa; }}
-    .label {{ font-size: 0.85rem; color: #666; }}
-    .value {{ font-size: 1.5rem; font-weight: bold; }}
-    object {{ width: 100%; min-height: 420px; border: 1px solid #ddd; margin-bottom: 1rem; }}
-    table {{ border-collapse: collapse; width: 100%; margin-top: 1rem; margin-bottom: 1rem; }}
-    th, td {{ border: 1px solid #ddd; padding: 0.5rem; text-align: left; }}
-    .split {{ display: grid; grid-template-columns: 2fr 1fr; gap: 1rem; }}
-    .feature-panel {{ display: grid; grid-template-columns: 2fr 1fr; gap: 1rem; align-items: stretch; margin-bottom: 1rem; }}
-    .feature-panel object {{ margin-bottom: 0; min-height: 460px; }}
-    .stat-panel {{ border: 1px solid #ddd; border-radius: 8px; padding: 1.25rem; background: #fafafa; display: flex; flex-direction: column; gap: 0.9rem; }}
-    .stat-panel h3 {{ margin: 0; font-size: 1.05rem; color: #1f4e79; }}
-    .stat-item {{ padding-bottom: 0.75rem; border-bottom: 1px solid #e5e5e5; }}
-    .stat-item:last-child {{ padding-bottom: 0; border-bottom: none; }}
-    .stat-label {{ font-size: 0.85rem; color: #666; }}
-    .stat-value {{ font-size: 1.35rem; font-weight: bold; color: #222; }}
-    @media (max-width: 900px) {{
-      .cards, .split, .feature-panel {{ grid-template-columns: 1fr; }}
-    }}
-  </style>
-</head>
-<body>
-  <h1>scfastq-qc report</h1>
-  <p><strong>Sample:</strong> {escape(summary['sample_name'])}</p>
-  <div class='cards'>
-    <div class='card'><div class='label'>Total reads</div><div class='value'>{summary['total_reads']}</div></div>
-    <div class='card'><div class='label'>Total bases</div><div class='value'>{summary['total_bases']}</div></div>
-    <div class='card'><div class='label'>Median read length</div><div class='value'>{summary['median_read_length']}</div></div>
-    <div class='card'><div class='label'>N50</div><div class='value'>{summary['n50']}</div></div>
-    <div class='card'><div class='label'>Median read Qscore</div><div class='value'>{summary['median_read_qscore']:.2f}</div></div>
-    <div class='card'><div class='label'>Long high-quality ratio</div><div class='value'>{summary['long_high_quality_ratio']:.2%}</div></div>
-    <div class='card'><div class='label'>Reversed read ratio</div><div class='value'>{summary['reversed_read_ratio']:.2%}</div></div>
-    <div class='card'><div class='label'>Correct anchor order ratio</div><div class='value'>{summary['correct_anchor_order_ratio']:.2%}</div></div>
-    <div class='card'><div class='label'>Anchor types</div><div class='value'>{len(summary['anchor_detection_ratio'])}</div></div>
-  </div>
-
-  <h2>Yield and quality</h2>
-  <div class='feature-panel'>
-    <object type='image/svg+xml' data='figures/read_length_hist.svg'></object>
-    <div class='stat-panel'>
-      <h3>Read length summary</h3>
-      {read_length_stat_html}
-    </div>
-  </div>
-  <object type='image/svg+xml' data='figures/read_length_cdf.svg'></object>
-  <object type='image/svg+xml' data='figures/mean_q_hist.svg'></object>
-  <object type='image/svg+xml' data='figures/read_q_density.svg'></object>
-  <object type='image/svg+xml' data='figures/length_q_scatter.svg'></object>
-
-  <h2>Anchor detection</h2>
-  <div class='split'>
-    <div>
-      <object type='image/svg+xml' data='figures/anchor_detect_bar.svg'></object>
-      <object type='image/svg+xml' data='figures/anchor_position_density.svg'></object>
-    </div>
-    <div>
-      <table>
-        <thead><tr><th>Anchor</th><th>Detection ratio</th></tr></thead>
-        <tbody>{anchor_rows}</tbody>
-      </table>
-    </div>
-  </div>
-
-  <h2>Structure classification</h2>
-  <object type='image/svg+xml' data='figures/structure_class_bar.svg'></object>
-  <object type='image/svg+xml' data='figures/structure_heatmap.svg'></object>
-  <table>
-    <thead><tr><th>Structure class</th><th>Orientation</th><th>Read count</th></tr></thead>
-    <tbody>{rows}</tbody>
-  </table>
-</body>
-</html>
-"""
+def _write_html_report(path: Path, summary: dict[str, Any], read_results: list[ReadResult], lengths: list[int], base_qscores: list[float], read_qscores: list[float], anchor_positions: dict[str, list[float]], heatmap_max_reads: int) -> None:
+    overall = summary["qc_verdicts"]["overall"]["status"]
+    overview_cards = "".join(f"<div class='metric-card'><div class='metric-label'>{escape(label)}</div><div class='metric-value'>{escape(value)}</div></div>" for label, value in [("Total reads", f"{summary['total_reads']:,}"), ("Total bases", f"{summary['total_bases']:,}"), ("Median read length", f"{summary['median_read_length']:,} bp"), ("N50", f"{summary['n50']:,} bp"), ("Median read Qscore", f"{summary['median_read_qscore']:.2f}"), ("5' truncation", f"{summary['five_prime_truncation_ratio']:.1%}"), ("3' truncation", f"{summary['three_prime_truncation_ratio']:.1%}"), ("High-N reads", f"{summary['high_n_read_ratio']:.1%}")])
+    verdict_cards = "".join(f"<div class='metric-card verdict-{escape(item['status'])}'><div class='metric-top'><div class='metric-label'>{escape(item['label'])}</div>{_status_pill(item['status'])}</div><div class='metric-value'>{item['value']:.1%}</div></div>" for key, item in summary["qc_verdicts"].items() if key != "overall")
+    anchor_rows = "".join(f"<tr><td>{escape(name)}</td><td>{values['detection_ratio']:.1%}</td><td>{values['mean_best_mismatches']:.2f}</td><td>{values['multi_hit_ratio']:.1%}</td><td>{values['mean_hits_per_positive_read']:.2f}</td></tr>" for name, values in summary["anchor_quality_stats"].items())
+    bucket_rows = "".join(f"<tr><td>{escape(bucket)}</td><td>{count:,}</td><td>{summary['qc_bucket_ratios'][bucket]:.1%}</td></tr>" for bucket, count in summary["qc_bucket_counts"].items())
+    structure_rows = "".join(f"<tr><td>{escape(label)}</td><td>{escape(orientation)}</td><td>{count:,}</td></tr>" for label, counts in summary["structure_orientation_counts"].items() for orientation, count in counts.items())
+    anchor_position_svg = _bar_chart([(name, sum(values) / len(values)) for name, values in anchor_positions.items() if values], "Anchor mean relative position", "Relative position", color="#2364aa", percent=True)
+    html = f"""<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>scfastq-qc report - {escape(summary['sample_name'])}</title><style>:root{{--bg:#f7f5ef;--paper:rgba(255,255,255,.84);--ink:#12232f;--muted:#5b6b78;--line:rgba(18,35,47,.1);--teal:#2d8f85;--amber:#d97706;--red:#d1495b;--shadow:0 18px 48px rgba(21,40,54,.1)}}*{{box-sizing:border-box}}body{{margin:0;font-family:'IBM Plex Sans','Segoe UI',sans-serif;color:var(--ink);background:radial-gradient(circle at top left, rgba(35,100,170,.12), transparent 26%),radial-gradient(circle at top right, rgba(45,143,133,.14), transparent 22%),linear-gradient(180deg,#f2efe5 0%,#fbfaf7 100%)}}.page{{max-width:1280px;margin:0 auto;padding:30px 18px 56px}}.hero,section{{background:var(--paper);border:1px solid var(--line);border-radius:24px;box-shadow:var(--shadow)}}.hero{{padding:26px}}section{{margin-top:22px;padding:22px}}.eyebrow{{letter-spacing:.18em;text-transform:uppercase;color:var(--muted);font-size:.74rem;margin-bottom:10px}}h1{{font-family:Georgia,'Times New Roman',serif;font-size:clamp(2.1rem,4vw,3.4rem);margin:0 0 10px}}h2,h3{{margin:0}}p{{margin:0;color:var(--muted)}}.hero-grid{{display:grid;grid-template-columns:2.2fr 1fr;gap:18px;align-items:end}}.hero-chip{{border:1px solid var(--line);border-radius:18px;background:rgba(255,255,255,.72);padding:14px 16px;margin-top:12px}}.cards{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}}.metric-card{{background:rgba(255,255,255,.74);border:1px solid rgba(18,35,47,.08);border-radius:18px;padding:16px;display:grid;gap:10px}}.metric-top{{display:flex;justify-content:space-between;gap:10px;align-items:center}}.metric-label{{color:var(--muted);font-size:.82rem;letter-spacing:.06em;text-transform:uppercase}}.metric-value{{font-size:clamp(1.35rem,2.8vw,1.95rem);font-weight:700}}.status-pill{{display:inline-flex;border-radius:999px;padding:7px 12px;font-size:.76rem;font-weight:700;letter-spacing:.08em}}.status-pass{{background:rgba(45,143,133,.12);color:var(--teal)}}.status-warn{{background:rgba(217,119,6,.12);color:var(--amber)}}.status-fail{{background:rgba(209,73,91,.12);color:var(--red)}}.verdict-pass{{border-color:rgba(45,143,133,.28)}}.verdict-warn{{border-color:rgba(217,119,6,.28)}}.verdict-fail{{border-color:rgba(209,73,91,.28)}}.section-head{{display:flex;justify-content:space-between;gap:16px;align-items:end;margin-bottom:16px}}.media-grid,.two-col{{display:grid;gap:16px}}.media-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}.two-col{{grid-template-columns:1.2fr 1fr}}.panel{{background:rgba(255,255,255,.74);border:1px solid rgba(18,35,47,.08);border-radius:18px;padding:14px;overflow:auto}}table{{width:100%;border-collapse:collapse;font-size:.95rem}}th,td{{padding:12px 14px;border-bottom:1px solid rgba(18,35,47,.08);text-align:left}}th{{background:rgba(18,35,47,.04);color:var(--muted);font-size:.78rem;text-transform:uppercase;letter-spacing:.06em}}tr:last-child td{{border-bottom:none}}.svg-wrap svg{{width:100%;height:auto;display:block}}code{{word-break:break-all}}@media (max-width:980px){{.hero-grid,.cards,.media-grid,.two-col{{grid-template-columns:1fr}}}}</style></head><body><div class='page'><header class='hero'><div class='eyebrow'>Structure-aware fastq QC</div><div class='hero-grid'><div><h1>{escape(summary['sample_name'])}</h1><p>Single-file HTML report for long-read single-cell basic QC: read yield, quality, anchor integrity, structure compliance, truncation, and orientation.</p><p style='margin-top:10px;'>Input FASTQ: <code>{escape(summary['fastq_path'])}</code></p><p style='margin-top:10px;'>Overall assessment: {_status_pill(overall)}</p></div><div><div class='hero-chip'><strong>Rust accelerator</strong><div>{escape(summary['rust_accelerator'].get('mode','unknown'))}</div><p style='margin-top:6px;'>{escape(summary['rust_accelerator'].get('detail',''))}</p></div><div class='hero-chip'><strong>Anchor order</strong><div>{summary['correct_anchor_order_ratio']:.1%}</div><p style='margin-top:6px;'>Reads whose detected anchors match the configured order.</p></div></div></div></header><section><div class='section-head'><div><h2>QC Verdicts</h2><p>Threshold-based pass, warn, fail calls for the core basic-QC indicators.</p></div></div><div class='cards'>{verdict_cards}</div></section><section><div class='section-head'><div><h2>Overview</h2><p>Yield, read quality, truncation, and contamination proxies at a glance.</p></div></div><div class='cards'>{overview_cards}</div></section><section><div class='section-head'><div><h2>Yield And Quality</h2><p>Baseline library quality by read length and Q-score distributions.</p></div></div><div class='media-grid'><div class='panel svg-wrap'>{_histogram([float(v) for v in lengths], "Read length distribution", "Read length (bp)")}</div><div class='panel svg-wrap'>{_histogram(base_qscores, "Overall base quality distribution", "Phred quality score", color="#2d8f85")}</div><div class='panel svg-wrap'>{_line_density(read_qscores, "Per-read Qscore density", "Read Qscore")}</div><div class='panel svg-wrap'>{_scatter(lengths, read_qscores, "Read length vs read Qscore")}</div></div></section><section><div class='section-head'><div><h2>Anchors</h2><p>Detection rate alone is not enough; mismatch burden and hit multiplicity expose weak motifs and internal artifacts.</p></div></div><div class='media-grid'><div class='panel svg-wrap'>{_bar_chart(list(summary['anchor_detection_ratio'].items()), "Anchor detection ratio", "Fraction of reads", color="#2364aa", percent=True)}</div><div class='panel svg-wrap'>{_bar_chart([(name, values['mean_best_mismatches']) for name, values in summary['anchor_quality_stats'].items()], "Anchor mismatch burden", "Mean best-hit mismatches", color="#d97706")}</div></div><div class='panel svg-wrap' style='margin-top:16px;'>{anchor_position_svg}</div><div class='panel' style='margin-top:16px;'><table><thead><tr><th>Anchor</th><th>Detection ratio</th><th>Mean mismatches</th><th>Multi-hit ratio</th><th>Mean hits / positive read</th></tr></thead><tbody>{anchor_rows}</tbody></table></div></section><section><div class='section-head'><div><h2>Structure And Failure Modes</h2><p>Basic-QC only: structure integrity, truncation, orientation, and read-level hygiene.</p></div></div><div class='media-grid'><div class='panel svg-wrap'>{_bar_chart([(key, float(value)) for key, value in summary['structure_counts'].items()], "Read structure classification", "Read count", color="#2d8f85")}</div><div class='panel svg-wrap'>{_bar_chart([(key, float(value)) for key, value in summary['qc_bucket_counts'].items()], "QC failure buckets", "Read count", color="#d1495b")}</div></div><div class='panel svg-wrap' style='margin-top:16px;'>{_heatmap(read_results, "Read structure heatmap", heatmap_max_reads)}</div><div class='two-col' style='margin-top:16px;'><div class='panel'><h3>QC Buckets</h3><table><thead><tr><th>Bucket</th><th>Reads</th><th>Ratio</th></tr></thead><tbody>{bucket_rows}</tbody></table></div><div class='panel'><h3>Structure Orientation</h3><table><thead><tr><th>Class</th><th>Orientation</th><th>Reads</th></tr></thead><tbody>{structure_rows}</tbody></table></div></div></section></div></body></html>"""
     _write_text(path, html)

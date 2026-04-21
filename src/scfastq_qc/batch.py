@@ -18,6 +18,60 @@ from .report import run_qc
 logger = logging.getLogger(__name__)
 
 
+def _write_batch_html_report(summary: dict[str, Any], outdir: Path) -> None:
+    successful = [item for item in summary["results"] if item.get("status") == "success" and item.get("summary")]
+    rows = "".join(
+        f"<tr><td>{Path(item['file']).name}</td><td>{item['summary']['total_reads']:,}</td><td>{item['summary']['long_high_quality_ratio']:.1%}</td><td>{item['summary']['correct_anchor_order_ratio']:.1%}</td><td>{item['summary']['qc_verdicts']['overall']['status']}</td></tr>"
+        for item in successful
+    )
+    html = f"""<!DOCTYPE html>
+<html lang='en'>
+<head>
+  <meta charset='utf-8'>
+  <meta name='viewport' content='width=device-width, initial-scale=1'>
+  <title>scfastq-qc batch summary</title>
+  <style>
+    body {{ font-family:'IBM Plex Sans','Segoe UI',sans-serif; margin:0; background:#f7f5ef; color:#12232f; }}
+    .page {{ max-width:1100px; margin:0 auto; padding:28px 18px 40px; }}
+    .hero, .panel {{ background:rgba(255,255,255,.86); border:1px solid rgba(18,35,47,.1); border-radius:22px; box-shadow:0 18px 48px rgba(21,40,54,.08); }}
+    .hero {{ padding:24px; }}
+    .panel {{ margin-top:20px; padding:18px; }}
+    .cards {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:14px; margin-top:18px; }}
+    .card {{ background:rgba(255,255,255,.78); border:1px solid rgba(18,35,47,.08); border-radius:18px; padding:14px; }}
+    .label {{ color:#5b6b78; font-size:.82rem; text-transform:uppercase; letter-spacing:.05em; }}
+    .value {{ font-size:1.8rem; font-weight:700; margin-top:8px; }}
+    table {{ width:100%; border-collapse:collapse; }}
+    th, td {{ padding:12px 14px; text-align:left; border-bottom:1px solid rgba(18,35,47,.08); }}
+    th {{ color:#5b6b78; font-size:.78rem; text-transform:uppercase; letter-spacing:.06em; }}
+    tr:last-child td {{ border-bottom:none; }}
+    @media (max-width:900px) {{ .cards {{ grid-template-columns:1fr 1fr; }} }}
+  </style>
+</head>
+<body>
+  <div class='page'>
+    <div class='hero'>
+      <h1>Batch QC Summary</h1>
+      <p>Cross-sample comparison for the basic QC metrics produced by scfastq-qc.</p>
+      <div class='cards'>
+        <div class='card'><div class='label'>Samples</div><div class='value'>{summary['total_count']}</div></div>
+        <div class='card'><div class='label'>Successful</div><div class='value'>{summary['success_count']}</div></div>
+        <div class='card'><div class='label'>Failed</div><div class='value'>{summary['failed_count']}</div></div>
+        <div class='card'><div class='label'>Success rate</div><div class='value'>{summary['success_rate']:.1%}</div></div>
+      </div>
+    </div>
+    <div class='panel'>
+      <h2>Per-sample comparison</h2>
+      <table>
+        <thead><tr><th>Sample</th><th>Total reads</th><th>Long high-quality</th><th>Anchor order</th><th>Overall QC</th></tr></thead>
+        <tbody>{rows}</tbody>
+      </table>
+    </div>
+  </div>
+</body>
+</html>"""
+    (outdir / "batch_report.html").write_text(html, encoding="utf-8")
+
+
 class BatchProcessingError(RuntimeError):
     def __init__(self, results: list[dict[str, Any]], summary: dict[str, Any]):
         self.results = results
@@ -27,6 +81,10 @@ class BatchProcessingError(RuntimeError):
         suffix = "..." if len(self.failed_results) > 3 else ""
         detail = f": {preview}{suffix}" if preview else ""
         super().__init__(f"Batch processing failed for {len(self.failed_results)} file(s){detail}")
+
+
+def _write_batch_report(summary: dict[str, Any], outdir: Path) -> None:
+    _write_batch_html_report(summary, outdir)
 
 
 def run_qc_single(args: tuple[Path, AppConfig, Path, bool]) -> dict[str, Any]:
@@ -150,6 +208,7 @@ def generate_batch_summary(results: list[dict[str, Any]], outdir: Path) -> dict[
     summary_path = outdir / "batch_summary.json"
     with open(summary_path, "w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2, ensure_ascii=False)
+    _write_batch_report(summary, outdir)
 
     logger.info("Batch summary saved to: %s", summary_path)
     return summary

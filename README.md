@@ -10,7 +10,7 @@ A structure-aware FASTQ QC tool for single-cell long-read libraries.
 - Configurable anchor detection using fixed sequences or regex patterns
 - Anchor order validation and read structure classification
 - Automatic forward / reverse-complement structure classification with reversed-read reporting
-- HTML report with figures and summary tables
+- Self-contained HTML report with inline figures and summary tables
 - Optional Rust accelerator for fixed-anchor scans with automatic Python fallback
 
 ## Quick start
@@ -24,9 +24,9 @@ python -m scfastq_qc.cli run \
 
 After the command finishes, inspect:
 
-- `out/report.html` for the interactive summary report
+- `out/report.html` for the self-contained summary report
 - `out/summary.json` for machine-readable metrics
-- `out/figures/` for the generated SVG figures
+- optional CSV exports when `--export-csv` is enabled
 
 ## Typical workflow
 
@@ -205,14 +205,14 @@ The report currently includes:
 - total reads, total bases, mean/median read length, and N50
 - read length histogram and cumulative distribution
 - base-level quality histogram, per-read Qscore density plot, and length-vs-read-Qscore scatter plot
-- anchor detection ratios and structure classification counts, including forward vs reversed orientation
-- anchor occupancy heatmap across normalized read positions
+- anchor detection ratios, mismatch burden, and structure classification counts, including forward vs reversed orientation
+- QC failure buckets, truncation indicators, and anchor occupancy heatmap across normalized read positions
 
 ## Build Rust accelerator
 
-The Rust module is an optional accelerator for fixed-anchor scans. If it is unavailable, incompatible, or fails to build/load, the package automatically falls back to the pure-Python implementation.
+The Rust module is an optional accelerator for fixed-anchor scans. If it is unavailable, incompatible, or fails to build/load, the package automatically falls back to the pure-Python implementation and records that fallback in the report.
 
-If `cargo` is available, the Python package attempts to build the Rust hotspot module automatically on first use, so most users do not need to run a separate setup step.
+If `cargo` is available, the Python package attempts to build the Rust hotspot module automatically on first use, so most users do not need to run a separate setup step. You can also point directly to a prebuilt shared library with the `SCFASTQ_QC_RUST_LIB` environment variable.
 
 You can still build it manually if you want:
 

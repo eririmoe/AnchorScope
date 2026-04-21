@@ -1,22 +1,13 @@
 from __future__ import annotations
 
 import csv
-import json
 from pathlib import Path
 from typing import Any
 
 
 def export_summary_to_csv(summary: dict[str, Any], output_path: Path) -> None:
-    """导出摘要到CSV文件
-    
-    Args:
-        summary: 包含QC分析结果的摘要字典
-        output_path: CSV文件输出路径
-    """
-    with open(output_path, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        
-        # 写入基本信息
+    with open(output_path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
         writer.writerow(["Metric", "Value"])
         writer.writerow(["Sample Name", summary.get("sample_name", "")])
         writer.writerow(["Total Reads", summary.get("total_reads", 0)])
@@ -30,20 +21,26 @@ def export_summary_to_csv(summary: dict[str, Any], output_path: Path) -> None:
         writer.writerow(["Long High-Quality Ratio", f"{summary.get('long_high_quality_ratio', 0):.4f}"])
         writer.writerow(["Reversed Read Ratio", f"{summary.get('reversed_read_ratio', 0):.4f}"])
         writer.writerow(["Correct Anchor Order Ratio", f"{summary.get('correct_anchor_order_ratio', 0):.4f}"])
-        
-        # 写入锚点检测率
+        writer.writerow(["5' Truncation Ratio", f"{summary.get('five_prime_truncation_ratio', 0):.4f}"])
+        writer.writerow(["3' Truncation Ratio", f"{summary.get('three_prime_truncation_ratio', 0):.4f}"])
+        writer.writerow(["High-N Read Ratio", f"{summary.get('high_n_read_ratio', 0):.4f}"])
+        writer.writerow(["Rust Accelerator", summary.get("rust_accelerator", {}).get("mode", "python-fallback")])
+
         writer.writerow([])
         writer.writerow(["Anchor Detection Ratios"])
         for anchor_name, ratio in summary.get("anchor_detection_ratio", {}).items():
             writer.writerow([anchor_name, f"{ratio:.4f}"])
-        
-        # 写入结构分类计数
+
+        writer.writerow([])
+        writer.writerow(["QC Bucket Counts"])
+        for reason, count in summary.get("qc_bucket_counts", {}).items():
+            writer.writerow([reason, count])
+
         writer.writerow([])
         writer.writerow(["Structure Classification Counts"])
         for structure, count in summary.get("structure_counts", {}).items():
             writer.writerow([structure, count])
-        
-        # 写入结构方向性计数
+
         writer.writerow([])
         writer.writerow(["Structure Orientation Counts"])
         for structure, orientations in summary.get("structure_orientation_counts", {}).items():
@@ -51,55 +48,91 @@ def export_summary_to_csv(summary: dict[str, Any], output_path: Path) -> None:
                 writer.writerow([f"{structure} ({orientation})", count])
 
 
-def export_anchor_hits_to_csv(read_results: list[dict], output_path: Path) -> None:
-    """导出锚点命中详情到CSV文件
-    
-    Args:
-        read_results: 包含每个读取结果的列表
-        output_path: CSV文件输出路径
-    """
-    with open(output_path, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(["Read ID", "Read Length", "Read Qscore", "Structure Label", "Is Reversed", 
-                         "Anchor Name", "Start", "End", "Mismatches", "Matched Sequence"])
-        
+def export_anchor_hits_to_csv(read_results: list[dict[str, Any]], output_path: Path) -> None:
+    with open(output_path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "Read ID",
+                "Read Length",
+                "Read Qscore",
+                "Structure Label",
+                "QC Bucket",
+                "Is Reversed",
+                "Anchor Name",
+                "Start",
+                "End",
+                "Mismatches",
+                "Matched Sequence",
+            ]
+        )
+
         for result in read_results:
-            read_id = result.get("read_id", "")
-            read_length = result.get("length", 0)
-            read_qscore = result.get("read_qscore", 0)
-            structure_label = result.get("structure_label", "")
-            is_reversed = result.get("is_reversed", False)
-            
             for hit in result.get("hits", []):
-                writer.writerow([
-                    read_id,
-                    read_length,
-                    f"{read_qscore:.2f}",
-                    structure_label,
-                    is_reversed,
-                    hit.get("anchor_name", ""),
-                    hit.get("start", 0),
-                    hit.get("end", 0),
-                    hit.get("mismatches", 0),
-                    hit.get("matched_sequence", "")
-                ])
+                writer.writerow(
+                    [
+                        result.get("read_id", ""),
+                        result.get("length", 0),
+                        f"{result.get('read_qscore', 0):.2f}",
+                        result.get("structure_label", ""),
+                        result.get("qc_bucket", ""),
+                        result.get("is_reversed", False),
+                        hit.get("anchor_name", ""),
+                        hit.get("start", 0),
+                        hit.get("end", 0),
+                        hit.get("mismatches", 0),
+                        hit.get("matched_sequence", ""),
+                    ]
+                )
+
+
+def export_read_results_to_csv(read_results: list[dict[str, Any]], output_path: Path) -> None:
+    with open(output_path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "Read ID",
+                "Read Length",
+                "Read Qscore",
+                "Structure Label",
+                "QC Bucket",
+                "QC Flags",
+                "Is Reversed",
+                "Order Valid",
+                "5p Offset",
+                "3p Offset",
+                "N Fraction",
+                "Invalid Base Fraction",
+                "Anchor Count",
+            ]
+        )
+        for result in read_results:
+            writer.writerow(
+                [
+                    result.get("read_id", ""),
+                    result.get("length", 0),
+                    f"{result.get('read_qscore', 0):.2f}",
+                    result.get("structure_label", ""),
+                    result.get("qc_bucket", ""),
+                    ";".join(result.get("qc_flags", [])),
+                    result.get("is_reversed", False),
+                    result.get("order_valid", False),
+                    f"{result.get('five_prime_offset', 0):.4f}" if result.get("five_prime_offset") is not None else "",
+                    f"{result.get('three_prime_offset', 0):.4f}" if result.get("three_prime_offset") is not None else "",
+                    f"{result.get('n_fraction', 0):.4f}",
+                    f"{result.get('invalid_base_fraction', 0):.4f}",
+                    result.get("anchor_count", 0),
+                ]
+            )
 
 
 def export_structure_classification_to_csv(summary: dict[str, Any], output_path: Path) -> None:
-    """导出结构分类详情到CSV文件
-    
-    Args:
-        summary: 包含QC分析结果的摘要字典
-        output_path: CSV文件输出路径
-    """
-    with open(output_path, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
+    with open(output_path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
         writer.writerow(["Structure Class", "Orientation", "Count", "Percentage"])
-        
+
         total_reads = summary.get("total_reads", 0)
-        structure_orientation_counts = summary.get("structure_orientation_counts", {})
-        
-        for structure, orientations in structure_orientation_counts.items():
+        for structure, orientations in summary.get("structure_orientation_counts", {}).items():
             for orientation, count in orientations.items():
                 percentage = (count / total_reads * 100) if total_reads > 0 else 0
                 writer.writerow([structure, orientation, count, f"{percentage:.2f}%"])

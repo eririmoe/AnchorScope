@@ -9,17 +9,18 @@ from unittest import mock
 
 from scfastq_qc import anchors as anchors_module
 from scfastq_qc.anchors import find_anchor_hits, get_rust_anchor_engine, prepare_anchors, reverse_complement
-from scfastq_qc.batch import BatchProcessingError, _allocate_output_dir, run_batch_qc
+from scfastq_qc.batch import BatchProcessingError, _allocate_output_dir, _build_batch_tasks, run_batch_qc
 from scfastq_qc.classify import classify_best_orientation
 from scfastq_qc.config import AnchorConfig, AppConfig, SampleEntry, StructureConfig, ThresholdConfig, load_config
 from scfastq_qc.fastq import FastqRead, read_fastq
-from scfastq_qc.report import run_qc
+from scfastq_qc.report import _bar_chart, _histogram, run_qc
 
 
 class SmokeTest(unittest.TestCase):
     @contextmanager
     def _temporary_directory(self):
-        tmpdir = Path(tempfile.mkdtemp(prefix="test-work-"))
+        repo = Path(__file__).resolve().parents[1]
+        tmpdir = Path(tempfile.mkdtemp(prefix="test-work-", dir=repo))
         try:
             yield str(tmpdir)
         finally:
@@ -46,6 +47,28 @@ class SmokeTest(unittest.TestCase):
             self.assertIn('Yield And Quality', report_html)
             self.assertIn('Structure And Failure Modes', report_html)
             self.assertIn('<svg', report_html)
+            self.assertIn('Read length (bp)', report_html)
+            self.assertIn('Probability density', report_html)
+            self.assertIn('Hover over the curve to inspect local density.', report_html)
+            self.assertIn('Hover over a bar to inspect its bin range and read count.', report_html)
+            self.assertIn('hist-bar-target', report_html)
+            self.assertIn('For each anchor, this is the average mismatch count of the best-scoring hit', report_html)
+
+    def test_bar_chart_keeps_small_nonzero_values_visible_in_labels(self):
+        html = _bar_chart(
+            [('adapter_5p', 0.1245221190606226), ('polyA', 0.0)],
+            'Anchor mismatch burden',
+            'Mean best-hit mismatches',
+            color='#d97706',
+        )
+        self.assertIn('>0.12</text>', html)
+        self.assertIn(">0</text>", html)
+
+    def test_histogram_uses_hover_targets_instead_of_bar_labels(self):
+        html = _histogram([10, 12, 12, 15, 20, 21], 'Read length distribution', 'Read length (bp)')
+        self.assertIn('Hover over a bar to inspect its bin range and read count.', html)
+        self.assertIn('hist-bar-target', html)
+        self.assertNotIn("data-count='0'", html)
 
     def test_read_qscore_matches_error_rate_definition(self):
         read = FastqRead(name='mixed', sequence='AAAA', quality='I!I!')
@@ -88,6 +111,17 @@ class SmokeTest(unittest.TestCase):
         self.assertEqual(first.name, 'sample')
         self.assertEqual(second.name, 'sample_2')
         self.assertEqual(third.name, 'sample_2_2')
+
+    def test_build_batch_tasks_rejects_sample_name_length_mismatch(self):
+        with self.assertRaisesRegex(ValueError, 'sample_names length must match fastq_files length'):
+            _build_batch_tasks(
+                fastq_files=[Path('a.fastq')],
+                config=AppConfig(),
+                output_root=Path('out'),
+                export_csv=False,
+                continue_on_error=False,
+                sample_names=[],
+            )
 
     def test_cli_batch_exits_nonzero_on_batch_failure(self):
         from scfastq_qc import cli as cli_module
@@ -288,6 +322,39 @@ class SmokeTest(unittest.TestCase):
             run_qc(str(repo / 'examples' / 'example.fastq'), config, tmpdir, export_csv=True)
             self.assertTrue((Path(tmpdir) / 'read_details.csv').exists())
             self.assertTrue((Path(tmpdir) / 'anchor_hits.csv').exists())
+
+    def test_run_qc_exports_non_full_structure_fastqs_when_enabled(self):
+        config = AppConfig(
+            sample_name='non_full_export',
+            export_non_full_structure_fastq=True,
+            anchors=[
+                AnchorConfig(name='adapter_5p', type='fixed', sequence='ACGTTGCA', max_mismatches=0),
+                AnchorConfig(name='polyT', type='regex', pattern='T{6,}'),
+            ],
+            structure=StructureConfig(expected_order=['adapter_5p', 'polyT']),
+            thresholds=ThresholdConfig(long_read_min_bp=0, long_read_min_q=0.0, heatmap_max_reads=10),
+        )
+        with self._temporary_directory() as tmpdir:
+            fastq_path = Path(tmpdir) / 'mixed.fastq'
+            fastq_path.write_text(
+                '\n'.join(
+                    [
+                        '@full',
+                        'ACGTTGCAGGGTTTTTTT',
+                        '+',
+                        'I' * 18,
+                        '@missing3',
+                        'ACGTTGCAGGGAAAAAAA',
+                        '+',
+                        'I' * 18,
+                    ]
+                ) + '\n',
+                encoding='utf-8',
+            )
+            run_qc(str(fastq_path), config, tmpdir)
+            exported = (Path(tmpdir) / 'missing_3p_anchor.fastq').read_text(encoding='utf-8')
+            self.assertIn('@missing3', exported)
+            self.assertNotIn('@full', exported)
 
     @unittest.skipUnless(shutil.which('cargo'), 'cargo not available')
     def test_rust_engine_available_after_auto_build(self):

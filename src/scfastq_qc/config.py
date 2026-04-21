@@ -52,6 +52,7 @@ class ThresholdConfig:
 class AppConfig:
     sample_name: str = "sample"
     samples: list[SampleEntry] | None = None
+    export_non_full_structure_fastq: bool = False
     anchors: list[AnchorConfig] = field(default_factory=list)
     structure: StructureConfig = field(default_factory=StructureConfig)
     thresholds: ThresholdConfig = field(default_factory=ThresholdConfig)
@@ -72,6 +73,7 @@ def load_config(path: str | Path) -> AppConfig:
     return AppConfig(
         sample_name=raw.get("sample_name", "sample"),
         samples=samples,
+        export_non_full_structure_fastq=raw.get("export_non_full_structure_fastq", False),
         anchors=anchors,
         structure=structure,
         thresholds=thresholds,

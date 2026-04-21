@@ -121,6 +121,12 @@ def _build_batch_tasks(
     continue_on_error: bool,
     sample_names: list[str | None] | None = None,
 ) -> tuple[list[tuple[Path, AppConfig, Path, bool, str | None]], list[dict[str, Any]]]:
+    if sample_names is not None and len(sample_names) != len(fastq_files):
+        raise ValueError(
+            "sample_names length must match fastq_files length: "
+            f"{len(sample_names)} != {len(fastq_files)}"
+        )
+
     tasks: list[tuple[Path, AppConfig, Path, bool, str | None]] = []
     failures: list[dict[str, Any]] = []
     used_output_names: set[str] = set()

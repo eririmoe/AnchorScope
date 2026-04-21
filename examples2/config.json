@@ -1,0 +1,34 @@
+{
+  "sample_name": "example_sample",
+  "samples": [
+    {
+      "sample_name": "real_10k_1",
+      "path": "examples2/10K_test.fastq"
+    },
+    {
+      "sample_name": "real_10k_2",
+      "path": "examples2/10k_test_2.fastq"
+    }
+  ],
+  "anchors": [
+    {
+      "name": "adapter_5p",
+      "type": "fixed",
+      "sequence": "CGACATGGCTACGATCCGACTT",
+      "max_mismatches": 1
+    },
+    {
+      "name": "polyA",
+      "type": "regex",
+      "pattern": "A{8,}"
+    }
+  ],
+  "structure": {
+    "expected_order": ["adapter_5p", "polyA"]
+  },
+  "thresholds": {
+    "long_read_min_bp": 200,
+    "long_read_min_q": 13,
+    "heatmap_max_reads": 500
+  }
+}

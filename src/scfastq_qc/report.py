@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ReadResult:
     read_id: str
+    sequence: str
+    quality: str
     length: int
     read_qscore: float
     structure_label: str
@@ -135,6 +137,8 @@ def _primary_qc_bucket(flags: list[str]) -> str:
 def _serialize_read_result(result: ReadResult) -> dict[str, Any]:
     return {
         "read_id": result.read_id,
+        "sequence": result.sequence,
+        "quality": result.quality,
         "length": result.length,
         "read_qscore": result.read_qscore,
         "structure_label": result.structure_label,
@@ -192,6 +196,22 @@ def _svg_wrapper(title: str, body: str, width: int = 780, height: int = 320) -> 
     return f"<svg xmlns='http://www.w3.org/2000/svg' width='{width}' height='{height}' viewBox='0 0 {width} {height}'><style>text{{font-family:IBM Plex Sans,Segoe UI,sans-serif;fill:#12232f}}.grid{{stroke:#d7e0e6;stroke-width:1}}.axis{{stroke:#304252;stroke-width:1}}.bar{{rx:5;ry:5}}</style><text x='18' y='28' font-size='20' font-weight='700'>{escape(title)}</text>{body}</svg>"
 
 
+def _format_axis_value(value: float, percent: bool = False) -> str:
+    if percent:
+        return f"{value:.0%}"
+    if abs(value) >= 100 or float(value).is_integer():
+        return _format_num(value, 0)
+    if abs(value) >= 10:
+        return f"{value:.1f}"
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def _linear_ticks(lower: float, upper: float, steps: int = 5) -> list[float]:
+    if upper <= lower:
+        return [lower]
+    return [lower + ((upper - lower) * idx / steps) for idx in range(steps + 1)]
+
+
 def _histogram(values: list[float], title: str, xlabel: str, color: str = "#2364aa", bins: int = 20) -> str:
     if not values:
         return _svg_wrapper(title, "<text x='40' y='90'>No data</text>")
@@ -208,23 +228,64 @@ def _histogram(values: list[float], title: str, xlabel: str, color: str = "#2364
         counts[min(bins - 1, int((value - lower) / step))] += 1
     max_count = max(counts) or 1
     parts: list[str] = []
+    hover_targets: list[str] = []
     for idx in range(6):
         y = top + plot_h - (idx / 5) * plot_h
         parts.append(f"<line class='grid' x1='{left}' y1='{y:.2f}' x2='{left+plot_w}' y2='{y:.2f}'/>")
         parts.append(f"<text x='{left-8}' y='{y+4:.2f}' text-anchor='end' font-size='11'>{_format_num((idx/5)*max_count, 0)}</text>")
+    x_ticks = _linear_ticks(lower, upper, 5)
+    for tick in x_ticks:
+        x = left + _scale(tick, lower, upper, plot_w)
+        parts.append(f"<line class='grid' x1='{x:.2f}' y1='{top}' x2='{x:.2f}' y2='{top+plot_h}' stroke-opacity='0.45'/>")
+        parts.append(f"<text x='{x:.2f}' y='{top+plot_h+20:.2f}' text-anchor='middle' font-size='11'>{escape(_format_axis_value(tick))}</text>")
     bar_w = plot_w / bins
     for idx, count in enumerate(counts):
         bar_h = (count / max_count) * plot_h
         x = left + idx * bar_w
         y = top + plot_h - bar_h
-        parts.append(f"<rect class='bar' x='{x:.2f}' y='{y:.2f}' width='{max(bar_w-1,1):.2f}' height='{bar_h:.2f}' fill='{color}'/>")
+        width_value = max(bar_w - 1, 1)
+        if bar_h > 0:
+            parts.append(f"<rect class='bar' x='{x:.2f}' y='{y:.2f}' width='{width_value:.2f}' height='{bar_h:.2f}' fill='{color}'/>")
+            bin_start = lower + idx * step
+            bin_end = lower + (idx + 1) * step
+            hover_targets.append(
+                f"<rect class='hist-bar-target' data-range='{bin_start:.2f} to {bin_end:.2f}' data-count='{count}' "
+                f"x='{x:.2f}' y='{top:.2f}' width='{width_value:.2f}' height='{plot_h:.2f}' fill='transparent'/>"
+            )
     parts.append(f"<line class='axis' x1='{left}' y1='{top+plot_h}' x2='{left+plot_w}' y2='{top+plot_h}'/>")
     parts.append(f"<line class='axis' x1='{left}' y1='{top}' x2='{left}' y2='{top+plot_h}'/>")
     parts.append(f"<text x='{width/2:.0f}' y='{height-12}' text-anchor='middle' font-size='12'>{escape(xlabel)}</text>")
-    return _svg_wrapper(title, ''.join(parts), width, height)
+    parts.append(f"<text x='18' y='{height/2:.0f}' transform='rotate(-90 18,{height/2:.0f})' text-anchor='middle' font-size='12'>Count</text>")
+    chart_id = "hist-" + "".join(ch if ch.isalnum() else "-" for ch in title.lower())
+    svg = _svg_wrapper(title, ''.join(parts) + ''.join(hover_targets), width, height).replace(
+        "<svg ",
+        f"<svg id='{escape(chart_id)}' ",
+        1,
+    )
+    return (
+        f"<div class='interactive-plot'><div class='plot-note'>Hover over a bar to inspect its bin range and read count.</div>{svg}"
+        f"<div class='plot-tip' id='{escape(chart_id)}-tip' hidden></div></div>"
+        f"<script>(function(){{"
+        f"const root=document.getElementById('{escape(chart_id)}');"
+        f"if(!root) return;"
+        f"const tip=document.getElementById('{escape(chart_id)}-tip');"
+        f"for(const node of root.querySelectorAll('.hist-bar-target')){{"
+        f"node.addEventListener('mouseenter', function(){{"
+        f"tip.hidden=false;"
+        f"tip.textContent='Range '+this.dataset.range+' | count '+this.dataset.count;"
+        f"}});"
+        f"node.addEventListener('mousemove', function(event){{"
+        f"const box=root.getBoundingClientRect();"
+        f"tip.style.left=(event.clientX-box.left+14)+'px';"
+        f"tip.style.top=(event.clientY-box.top-10)+'px';"
+        f"}});"
+        f"node.addEventListener('mouseleave', function(){{ tip.hidden=true; }});"
+        f"}}"
+        f"}})();</script>"
+    )
 
 
-def _line_density(values: list[float], title: str, xlabel: str, color: str = "#2d8f85", bin_width: float = 0.2) -> str:
+def _line_density(values: list[float], title: str, xlabel: str, color: str = "#2d8f85", bin_width: float = 0.2, chart_id: str = "density") -> str:
     if not values:
         return _svg_wrapper(title, "<text x='40' y='90'>No data</text>")
     width, height = 780, 320
@@ -243,13 +304,63 @@ def _line_density(values: list[float], title: str, xlabel: str, color: str = "#2
     densities = [count / (len(values) * bin_width) for count in counts]
     y_max = max(densities) * 1.1 if densities else 1.0
     points = []
+    hover_targets: list[str] = []
+    x_ticks = _linear_ticks(lower, upper, 5)
+    y_ticks = _linear_ticks(0, y_max, 5)
+    parts: list[str] = []
+    for tick in x_ticks:
+        x = left + _scale(tick, lower, upper, plot_w)
+        parts.append(f"<line class='grid' x1='{x:.2f}' y1='{top}' x2='{x:.2f}' y2='{top+plot_h}' stroke-opacity='0.45'/>")
+        parts.append(f"<text x='{x:.2f}' y='{top+plot_h+20:.2f}' text-anchor='middle' font-size='11'>{escape(_format_axis_value(tick))}</text>")
+    for tick in y_ticks:
+        y = top + plot_h - _scale(tick, 0, y_max, plot_h)
+        parts.append(f"<line class='grid' x1='{left}' y1='{y:.2f}' x2='{left+plot_w}' y2='{y:.2f}'/>")
+        parts.append(f"<text x='{left-8}' y='{y+4:.2f}' text-anchor='end' font-size='11'>{escape(_format_axis_value(tick))}</text>")
     for idx, density in enumerate(densities):
         x_value = lower + (idx + 0.5) * bin_width
         x = left + _scale(x_value, lower, upper, plot_w)
         y = top + plot_h - _scale(density, 0, y_max, plot_h)
         points.append(f"{x:.2f},{y:.2f}")
-    body = f"<line class='axis' x1='{left}' y1='{top+plot_h}' x2='{left+plot_w}' y2='{top+plot_h}'/><line class='axis' x1='{left}' y1='{top}' x2='{left}' y2='{top+plot_h}'/><polygon points='{left},{top+plot_h} {' '.join(points)} {left+plot_w},{top+plot_h}' fill='{color}' fill-opacity='0.16'/><polyline fill='none' stroke='{color}' stroke-width='2.5' points='{' '.join(points)}'/><text x='{width/2:.0f}' y='{height-12}' text-anchor='middle' font-size='12'>{escape(xlabel)}</text>"
-    return _svg_wrapper(title, body, width, height)
+        hover_targets.append(
+            f"<circle class='density-point' data-q='{x_value:.2f}' data-density='{density:.4f}' cx='{x:.2f}' cy='{y:.2f}' r='5' fill='{color}' fill-opacity='0.01' stroke='transparent'/>"
+        )
+        parts.append(f"<circle cx='{x:.2f}' cy='{y:.2f}' r='2.3' fill='{color}'/>")
+    body = (
+        f"<line class='axis' x1='{left}' y1='{top+plot_h}' x2='{left+plot_w}' y2='{top+plot_h}'/>"
+        f"<line class='axis' x1='{left}' y1='{top}' x2='{left}' y2='{top+plot_h}'/>"
+        f"<polygon points='{left},{top+plot_h} {' '.join(points)} {left+plot_w},{top+plot_h}' fill='{color}' fill-opacity='0.16'/>"
+        f"<polyline fill='none' stroke='{color}' stroke-width='2.5' points='{' '.join(points)}'/>"
+        f"{''.join(parts)}"
+        f"{''.join(hover_targets)}"
+        f"<text x='{width/2:.0f}' y='{height-12}' text-anchor='middle' font-size='12'>{escape(xlabel)}</text>"
+        f"<text x='18' y='{height/2:.0f}' transform='rotate(-90 18,{height/2:.0f})' text-anchor='middle' font-size='12'>Probability density</text>"
+    )
+    svg = _svg_wrapper(title, body, width, height).replace(
+        "<svg ",
+        f"<svg id='{escape(chart_id)}' ",
+        1,
+    )
+    return (
+        f"<div class='interactive-plot'><div class='plot-note'>Hover over the curve to inspect local density.</div>{svg}"
+        f"<div class='plot-tip' id='{escape(chart_id)}-tip' hidden></div></div>"
+        f"<script>(function(){{"
+        f"const root=document.getElementById('{escape(chart_id)}');"
+        f"if(!root) return;"
+        f"const tip=document.getElementById('{escape(chart_id)}-tip');"
+        f"for(const node of root.querySelectorAll('.density-point')){{"
+        f"node.addEventListener('mouseenter', function(){{"
+        f"tip.hidden=false;"
+        f"tip.textContent='Qscore '+this.dataset.q+' | density '+this.dataset.density;"
+        f"}});"
+        f"node.addEventListener('mousemove', function(event){{"
+        f"const box=root.getBoundingClientRect();"
+        f"tip.style.left=(event.clientX-box.left+14)+'px';"
+        f"tip.style.top=(event.clientY-box.top-10)+'px';"
+        f"}});"
+        f"node.addEventListener('mouseleave', function(){{ tip.hidden=true; }});"
+        f"}}"
+        f"}})();</script>"
+    )
 
 
 def _bar_chart(items: list[tuple[str, float]], title: str, ylabel: str, color: str = "#d1495b", percent: bool = False) -> str:
@@ -260,16 +371,23 @@ def _bar_chart(items: list[tuple[str, float]], title: str, ylabel: str, color: s
     plot_w, plot_h = width - left - right, height - top - bottom
     y_max = 1.0 if percent else max(value for _, value in items) or 1.0
     parts = [f"<line class='axis' x1='{left}' y1='{top+plot_h}' x2='{left+plot_w}' y2='{top+plot_h}'/>", f"<line class='axis' x1='{left}' y1='{top}' x2='{left}' y2='{top+plot_h}'/>"]
+    for tick in _linear_ticks(0, y_max, 5):
+        y = top + plot_h - _scale(tick, 0, y_max, plot_h)
+        parts.append(f"<line class='grid' x1='{left}' y1='{y:.2f}' x2='{left+plot_w}' y2='{y:.2f}'/>")
+        parts.append(f"<text x='{left-8}' y='{y+4:.2f}' text-anchor='end' font-size='11'>{escape(_format_axis_value(tick, percent=percent))}</text>")
     slot_w = plot_w / len(items)
     bar_w = min(slot_w * 0.58, 120)
     for idx, (label, value) in enumerate(items):
         bar_h = (value / y_max) * plot_h if y_max else 0
         x = left + idx * slot_w + (slot_w - bar_w) / 2
         y = top + plot_h - bar_h
-        disp = f"{value:.1%}" if percent else _format_num(value, 0)
+        disp = _format_axis_value(value, percent=percent)
         tx = left + idx * slot_w + slot_w / 2
-        parts.append(f"<rect class='bar' x='{x:.2f}' y='{y:.2f}' width='{bar_w:.2f}' height='{bar_h:.2f}' fill='{color}'/>")
-        parts.append(f"<text x='{tx:.2f}' y='{y-8:.2f}' text-anchor='middle' font-size='11'>{escape(disp)}</text>")
+        if bar_h > 0:
+            parts.append(f"<rect class='bar' x='{x:.2f}' y='{y:.2f}' width='{bar_w:.2f}' height='{bar_h:.2f}' fill='{color}'/>")
+            parts.append(f"<text x='{tx:.2f}' y='{max(y-8, top+10):.2f}' text-anchor='middle' font-size='11'>{escape(disp)}</text>")
+        else:
+            parts.append(f"<text x='{tx:.2f}' y='{top+plot_h-6:.2f}' text-anchor='middle' font-size='11'>{escape(disp)}</text>")
         parts.append(f"<text x='{tx:.2f}' y='{top+plot_h+22:.2f}' text-anchor='end' transform='rotate(-24 {tx:.2f},{top+plot_h+22:.2f})' font-size='11'>{escape(label)}</text>")
     parts.append(f"<text x='20' y='{height/2:.0f}' transform='rotate(-90 20,{height/2:.0f})' text-anchor='middle' font-size='12'>{escape(ylabel)}</text>")
     return _svg_wrapper(title, ''.join(parts), width, height)
@@ -288,6 +406,14 @@ def _scatter(lengths: list[int], read_qscores: list[float], title: str) -> str:
     if min_y == max_y:
         max_y += 1
     parts = [f"<line class='axis' x1='{left}' y1='{top+plot_h}' x2='{left+plot_w}' y2='{top+plot_h}'/>", f"<line class='axis' x1='{left}' y1='{top}' x2='{left}' y2='{top+plot_h}'/>"]
+    for tick in _linear_ticks(min_x, max_x, 5):
+        x = left + _scale(tick, min_x, max_x, plot_w)
+        parts.append(f"<line class='grid' x1='{x:.2f}' y1='{top}' x2='{x:.2f}' y2='{top+plot_h}' stroke-opacity='0.45'/>")
+        parts.append(f"<text x='{x:.2f}' y='{top+plot_h+20:.2f}' text-anchor='middle' font-size='11'>{escape(_format_axis_value(tick))}</text>")
+    for tick in _linear_ticks(min_y, max_y, 5):
+        y = top + plot_h - _scale(tick, min_y, max_y, plot_h)
+        parts.append(f"<line class='grid' x1='{left}' y1='{y:.2f}' x2='{left+plot_w}' y2='{y:.2f}'/>")
+        parts.append(f"<text x='{left-8}' y='{y+4:.2f}' text-anchor='end' font-size='11'>{escape(_format_axis_value(tick))}</text>")
     for x_value, y_value in zip(lengths, read_qscores):
         x = left + _scale(x_value, min_x, max_x, plot_w)
         y = top + plot_h - _scale(y_value, min_y, max_y, plot_h)
@@ -298,13 +424,33 @@ def _scatter(lengths: list[int], read_qscores: list[float], title: str) -> str:
 
 
 def _heatmap(read_results: list[ReadResult], title: str, max_reads: int) -> str:
-    width, height = 900, 360
-    left, top, right, bottom = 60, 48, 20, 36
-    plot_w, plot_h = width - left - right, height - top - bottom
-    sampled = read_results[:max_reads]
-    if not sampled:
-        return _svg_wrapper(title, "<text x='40' y='90'>No data</text>", width, height)
-    row_h = max(1, plot_h / len(sampled))
+    width = 900
+    left, top, right, bottom = 60, 48, 20, 72
+    if not read_results:
+        return _svg_wrapper(title, "<text x='40' y='90'>No data</text>", width, 360)
+    # Group similar reads together so full-library rendering remains interpretable.
+    sampled = sorted(
+        read_results,
+        key=lambda result: (
+            result.qc_bucket,
+            result.structure_label,
+            result.is_reversed,
+            -result.length,
+            result.read_id,
+        ),
+    )
+    total_reads = len(sampled)
+    if total_reads <= 60:
+        row_h = 4.0
+    elif total_reads <= 250:
+        row_h = 2.6
+    elif total_reads <= 2000:
+        row_h = 1.4
+    else:
+        row_h = 1.0
+    plot_h = max(180.0, total_reads * row_h)
+    height = int(top + plot_h + bottom)
+    plot_w = width - left - right
     col_w = plot_w / 100
     palette = {"pass": "#2d8f85", "too_short": "#d1495b", "low_read_q": "#d97706", "no_anchor": "#8d99ae"}
     parts = [f"<line class='axis' x1='{left}' y1='{top+plot_h}' x2='{left+plot_w}' y2='{top+plot_h}'/>"]
@@ -318,8 +464,79 @@ def _heatmap(read_results: list[ReadResult], title: str, max_reads: int) -> str:
             start = min(99, int((hit.start / result.length) * 100))
             end = min(100, max(start + 1, int((hit.end / result.length) * 100)))
             parts.append(f"<rect x='{left + start*col_w:.2f}' y='{y:.2f}' width='{(end-start)*col_w:.2f}' height='{row_h:.2f}' fill='#2364aa'/>")
-    parts.append(f"<text x='{width/2:.0f}' y='{height-10}' text-anchor='middle' font-size='12'>Normalized read position</text>")
-    return _svg_wrapper(title, ''.join(parts), width, height)
+    for tick in range(6):
+        x = left + (tick / 5) * plot_w
+        label = f"{int((tick / 5) * 100)}%"
+        parts.append(f"<line class='grid' x1='{x:.2f}' y1='{top}' x2='{x:.2f}' y2='{top+plot_h}' stroke-opacity='0.45'/>")
+        parts.append(f"<text x='{x:.2f}' y='{top+plot_h+24:.2f}' text-anchor='middle' font-size='11'>{label}</text>")
+    parts.append(f"<text x='{width/2:.0f}' y='{height-18:.2f}' text-anchor='middle' font-size='12'>Normalized read position</text>")
+    svg = _svg_wrapper(title, ''.join(parts), width, height)
+    visible_height = min(max(height, 280), 560)
+    note = (
+        f"Showing all {total_reads:,} reads. Scroll vertically to inspect the full stack. "
+        f"Rows are grouped by QC bucket and structure class to make global patterns easier to read."
+    )
+    legend_items = [
+        ("QC bucket: pass", "#2d8f85"),
+        ("QC bucket: too_short", "#d1495b"),
+        ("QC bucket: low_read_q", "#d97706"),
+        ("QC bucket: no_anchor", "#8d99ae"),
+        ("QC bucket: other", "#e6eef3"),
+        ("Anchor hit span", "#2364aa"),
+    ]
+    legend_html = "".join(
+        f"<span class='heatmap-legend-item'>"
+        f"<span class='heatmap-swatch' style='background:{color}'></span>"
+        f"<span>{escape(label)}</span>"
+        f"</span>"
+        for label, color in legend_items
+    )
+    return (
+        f"<div class='heatmap-frame'>"
+        f"<div class='plot-note'>{escape(note)}</div>"
+        f"<div class='heatmap-legend'>{legend_html}</div>"
+        f"<div class='chart-note'>Rows are sorted by `qc_bucket`, then `structure_label`, then orientation, then read length. The blue blocks mark the relative span of detected anchor hits on each read.</div>"
+        f"<div class='heatmap-scroll' style='max-height:{visible_height}px'>{svg}</div>"
+        f"</div>"
+    )
+
+
+def _anchor_position_tracks(anchor_positions: dict[str, list[float]]) -> str:
+    items = [(name, sum(values) / len(values)) for name, values in anchor_positions.items() if values]
+    if not items:
+        return _svg_wrapper("Anchor mean relative position", "<text x='40' y='90'>No data</text>", 900, 240)
+    width = 900
+    height = max(220, 130 + len(items) * 46)
+    left, top, right, bottom = 160, 54, 36, 48
+    plot_w = width - left - right
+    row_gap = 40
+    parts = []
+    for tick in range(6):
+        x = left + (tick / 5) * plot_w
+        parts.append(f"<line class='grid' x1='{x:.2f}' y1='{top-6}' x2='{x:.2f}' y2='{height-bottom+6}' stroke-opacity='0.4'/>")
+        parts.append(f"<text x='{x:.2f}' y='{height-18:.2f}' text-anchor='middle' font-size='11'>{int((tick / 5) * 100)}%</text>")
+    for idx, (name, value) in enumerate(items):
+        y = top + idx * row_gap
+        x = left + value * plot_w
+        parts.append(f"<text x='{left-12:.2f}' y='{y+4:.2f}' text-anchor='end' font-size='12'>{escape(name)}</text>")
+        parts.append(f"<line class='axis' x1='{left}' y1='{y:.2f}' x2='{left+plot_w}' y2='{y:.2f}'/>")
+        parts.append(f"<polygon points='{x:.2f},{y-11:.2f} {x-7:.2f},{y+1:.2f} {x+7:.2f},{y+1:.2f}' fill='#2364aa'/>")
+        parts.append(f"<circle cx='{x:.2f}' cy='{y:.2f}' r='4.5' fill='#2364aa'/>")
+        parts.append(f"<text x='{min(x + 10, left + plot_w - 6):.2f}' y='{y-10:.2f}' font-size='11'>{value:.1%}</text>")
+    parts.append(f"<text x='{width/2:.0f}' y='{height-4:.2f}' text-anchor='middle' font-size='12'>Relative position from 5' to 3' end of the read</text>")
+    return _svg_wrapper("Anchor mean relative position", "".join(parts), width, height)
+
+
+def _write_structure_fastq_exports(outdir: Path, read_results: list[ReadResult]) -> None:
+    grouped: dict[str, list[ReadResult]] = defaultdict(list)
+    for result in read_results:
+        if result.structure_label != "full_structure":
+            grouped[result.structure_label].append(result)
+    for structure_label, records in grouped.items():
+        lines: list[str] = []
+        for result in records:
+            lines.extend([f"@{result.read_id}", result.sequence, "+", result.quality])
+        _write_text(outdir / f"{structure_label}.fastq", "\n".join(lines) + "\n")
 
 
 def _status_pill(status: str) -> str:
@@ -367,7 +584,23 @@ def run_qc(fastq_path: str, config: AppConfig, outdir: str, export_csv: bool = F
         five_prime_offset, three_prime_offset = _compute_terminal_offsets(best_hits, config.structure.expected_order, read.length)
         qc_flags = _derive_qc_flags(read, structure.label, five_prime_offset, three_prime_offset, config, hits)
         qc_bucket = _primary_qc_bucket(qc_flags)
-        result = ReadResult(read.name, read.length, read.read_qscore, structure.label, structure.is_reversed, structure.order_valid, hits, qc_bucket, qc_flags, five_prime_offset, three_prime_offset, read.n_fraction, read.invalid_base_fraction)
+        result = ReadResult(
+            read.name,
+            read.sequence,
+            read.quality,
+            read.length,
+            read.read_qscore,
+            structure.label,
+            structure.is_reversed,
+            structure.order_valid,
+            hits,
+            qc_bucket,
+            qc_flags,
+            five_prime_offset,
+            three_prime_offset,
+            read.n_fraction,
+            read.invalid_base_fraction,
+        )
         read_results.append(result)
         structure_counts[structure.label] += 1
         structure_orientation_counts[(structure.label, "reversed" if structure.is_reversed else "forward")] += 1
@@ -410,6 +643,7 @@ def run_qc(fastq_path: str, config: AppConfig, outdir: str, export_csv: bool = F
         "config_summary": {
             "anchors": [anchor.name for anchor in config.anchors],
             "expected_order": list(config.structure.expected_order),
+            "export_non_full_structure_fastq": config.export_non_full_structure_fastq,
             "long_read_min_bp": config.thresholds.long_read_min_bp,
             "long_read_min_q": config.thresholds.long_read_min_q,
             "terminal_anchor_max_offset": config.thresholds.terminal_anchor_max_offset,
@@ -446,6 +680,8 @@ def run_qc(fastq_path: str, config: AppConfig, outdir: str, export_csv: bool = F
         export_structure_classification_to_csv(summary, out_path / "structure_classification.csv")
         export_read_results_to_csv(serialized, out_path / "read_details.csv")
         export_anchor_hits_to_csv(serialized, out_path / "anchor_hits.csv")
+    if config.export_non_full_structure_fastq:
+        _write_structure_fastq_exports(out_path, read_results)
     _write_html_report(out_path / "report.html", summary, read_results, lengths, base_qscores, read_qscores, anchor_positions, config.thresholds.heatmap_max_reads)
     return summary
 
@@ -467,29 +703,30 @@ def _write_html_report(path: Path, summary: dict[str, Any], read_results: list[R
         "5' truncation": "Fraction of reads whose first expected anchor starts farther from the 5' end than the configured terminal offset threshold.",
         "3' truncation": "Fraction of reads whose last expected anchor ends farther from the 3' end than the configured terminal offset threshold.",
         "High-N reads": "Fraction of reads with N content at or above the configured cutoff.",
-        "Anchor detection ratio": "Fraction of reads in which each anchor is detected at least once.",
-        "Anchor mismatch burden": "Average mismatch count of the best hit for each anchor among reads where that anchor was detected.",
-        "Anchor mean relative position": "Average normalized start position of the best hit for each anchor along the read length.",
+        "Anchor detection ratio": "Fraction of reads in which each anchor is detected at least once. High detection with low mismatch burden usually indicates a strong and well-positioned motif.",
+        "Anchor mismatch burden": "For each anchor, this is the average mismatch count of the best-scoring hit among reads where that anchor was actually detected. A value near 0 means the anchor is typically recovered with an exact or near-exact sequence match; larger values suggest sequence drift, weak specificity, or false-positive pressure.",
+        "Anchor mean relative position": "Average normalized start position of the best anchor hit along the read length, where 0% is the 5' end and 100% is the 3' end. This helps confirm whether anchors appear where the library design expects them to appear.",
         "Detection ratio": "Fraction of reads in which the anchor was detected at least once.",
-        "Mean mismatches": "Average mismatch count of the best-scoring hit for this anchor among positive reads.",
-        "Multi-hit ratio": "Fraction of anchor-positive reads that contain more than one hit for the same anchor.",
-        "Mean hits / positive read": "Average number of hits for this anchor among reads where the anchor was detected.",
+        "Mean mismatches": "Average mismatch count of the best-scoring hit for this anchor among anchor-positive reads only. Reads where the anchor is absent are not included in this average.",
+        "Multi-hit ratio": "Fraction of anchor-positive reads that contain more than one hit for the same anchor. Elevated values can indicate repeated motifs, internal adapters, or overly permissive matching.",
+        "Mean hits / positive read": "Average number of hits for this anchor among reads where the anchor was detected. Values materially above 1 suggest duplicated or internal occurrences.",
         "Read structure classification": "Counts of reads grouped by the structure class inferred from anchor presence and order.",
         "QC failure buckets": "Primary read-level QC failure reason assigned to each read after applying priority ordering.",
-        "Read structure heatmap": "Normalized per-read view of anchor occupancy across read position for a subset of reads.",
+        "Read structure heatmap": "Normalized per-read view of anchor occupancy across read position for the full library. Rows are grouped by QC bucket and structure class, and the panel can be scrolled vertically when the library is large.",
         "QC Buckets": "Counts and fractions for the primary QC failure bucket assigned to each read.",
-        "Structure Orientation": "Counts of each structure class stratified by forward versus reverse-complement orientation.",
+        "Structure Orientation": "Counts of each structure class stratified by forward versus reverse-complement orientation. This is useful for spotting strand inversions or reverse-complement enrichment outside the expected full-structure population.",
     }
     config_items = "".join(
         f"<div class='config-row'><span>{escape(label)}</span><strong>{escape(value)}</strong></div>"
         for label, value in [
             ("Rust", f"{summary['rust_accelerator'].get('mode', 'unknown')}"),
             ("Anchors", ", ".join(config_summary["anchors"]) or "none"),
-            ("Expected order", " → ".join(config_summary["expected_order"]) or "none"),
+            ("Expected order", " -> ".join(config_summary["expected_order"]) or "none"),
             ("Min long read", f"{config_summary['long_read_min_bp']:,} bp"),
             ("Min read Q", f"{config_summary['long_read_min_q']:.2f}"),
             ("Terminal offset", f"{config_summary['terminal_anchor_max_offset']:.0%}"),
             ("High-N cutoff", f"{config_summary['high_n_fraction']:.0%}"),
+            ("Export non-full FASTQ", "enabled" if config_summary["export_non_full_structure_fastq"] else "disabled"),
         ]
     )
     overview_cards = "".join(f"<div class='metric-card'><div class='metric-label'>{_tooltip_label(label, metric_help[label])}</div><div class='metric-value'>{escape(value)}</div></div>" for label, value in [("Total reads", f"{summary['total_reads']:,}"), ("Total bases", f"{summary['total_bases']:,}"), ("Median read length", f"{summary['median_read_length']:,} bp"), ("N50", f"{summary['n50']:,} bp"), ("Median read Qscore", f"{summary['median_read_qscore']:.2f}"), ("5' truncation", f"{summary['five_prime_truncation_ratio']:.1%}"), ("3' truncation", f"{summary['three_prime_truncation_ratio']:.1%}"), ("High-N reads", f"{summary['high_n_read_ratio']:.1%}")])
@@ -497,6 +734,9 @@ def _write_html_report(path: Path, summary: dict[str, Any], read_results: list[R
     anchor_rows = "".join(f"<tr><td>{escape(name)}</td><td>{values['detection_ratio']:.1%}</td><td>{values['mean_best_mismatches']:.2f}</td><td>{values['multi_hit_ratio']:.1%}</td><td>{values['mean_hits_per_positive_read']:.2f}</td></tr>" for name, values in summary["anchor_quality_stats"].items())
     bucket_rows = "".join(f"<tr><td>{escape(bucket)}</td><td>{count:,}</td><td>{summary['qc_bucket_ratios'][bucket]:.1%}</td></tr>" for bucket, count in summary["qc_bucket_counts"].items())
     structure_rows = "".join(f"<tr><td>{escape(label)}</td><td>{escape(orientation)}</td><td>{count:,}</td></tr>" for label, counts in summary["structure_orientation_counts"].items() for orientation, count in counts.items())
-    anchor_position_svg = _bar_chart([(name, sum(values) / len(values)) for name, values in anchor_positions.items() if values], "Anchor mean relative position", "Relative position", color="#2364aa", percent=True)
-    html = f"""<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>scfastq-qc report - {escape(summary['sample_name'])}</title><style>:root{{--bg:#f7f5ef;--paper:rgba(255,255,255,.84);--ink:#12232f;--muted:#5b6b78;--line:rgba(18,35,47,.1);--teal:#2d8f85;--amber:#d97706;--red:#d1495b;--shadow:0 18px 48px rgba(21,40,54,.1)}}*{{box-sizing:border-box}}body{{margin:0;font-family:'IBM Plex Sans','Segoe UI',sans-serif;color:var(--ink);background:radial-gradient(circle at top left, rgba(35,100,170,.12), transparent 26%),radial-gradient(circle at top right, rgba(45,143,133,.14), transparent 22%),linear-gradient(180deg,#f2efe5 0%,#fbfaf7 100%)}}.page{{max-width:1280px;margin:0 auto;padding:30px 18px 56px}}.hero,section{{background:var(--paper);border:1px solid var(--line);border-radius:24px;box-shadow:var(--shadow)}}.hero{{padding:26px}}section{{margin-top:22px;padding:22px;overflow:visible}}.eyebrow{{letter-spacing:.18em;text-transform:uppercase;color:var(--muted);font-size:.74rem;margin-bottom:10px}}h1{{font-family:Georgia,'Times New Roman',serif;font-size:clamp(2.1rem,4vw,3.4rem);margin:0 0 10px}}h2,h3{{margin:0}}p{{margin:0;color:var(--muted)}}.hero-meta{{display:grid;gap:10px}}.assessment-line{{display:flex;align-items:center;gap:10px;flex-wrap:wrap}}.tooltip{{position:relative;display:inline-flex;cursor:help;vertical-align:middle;z-index:2}}.metric-tip{{margin:0}}.metric-tip-inline{{display:inline-flex;align-items:center;justify-content:flex-start}}.tooltip-trigger{{display:inline;border-bottom:1px dashed rgba(35,100,170,.45);color:inherit;transition:border-color .16s ease,color .16s ease}}.tooltip:hover .tooltip-trigger,.tooltip:focus-within .tooltip-trigger{{border-bottom-color:#2364aa;color:#2364aa}}.tooltip-content{{position:absolute;left:50%;bottom:calc(100% + 12px);transform:translateX(-50%) translateY(4px);width:min(360px,80vw);padding:12px 14px;border-radius:16px;background:rgba(255,255,255,.98);border:1px solid rgba(18,35,47,.12);box-shadow:0 18px 48px rgba(21,40,54,.16);font-size:.86rem;line-height:1.5;color:var(--ink);opacity:0;pointer-events:none;transition:opacity .16s ease,transform .16s ease;z-index:50;text-align:left;text-transform:none;letter-spacing:normal;font-weight:400}}.tooltip-content::after{{content:'';position:absolute;left:50%;top:100%;width:12px;height:12px;background:rgba(255,255,255,.98);border-right:1px solid rgba(18,35,47,.12);border-bottom:1px solid rgba(18,35,47,.12);transform:translateX(-50%) rotate(45deg)}}.tooltip-below .tooltip-content{{top:calc(100% + 12px);bottom:auto;transform:translateX(-50%) translateY(-4px)}}.tooltip-below .tooltip-content::after{{top:auto;bottom:100%;border-right:none;border-bottom:none;border-left:1px solid rgba(18,35,47,.12);border-top:1px solid rgba(18,35,47,.12)}}.tooltip:hover .tooltip-content,.tooltip:focus-within .tooltip-content{{opacity:1;transform:translateX(-50%) translateY(0)}}.tooltip-below:hover .tooltip-content,.tooltip-below:focus-within .tooltip-content{{transform:translateX(-50%) translateY(0)}}.tooltip-content strong{{display:block;margin-bottom:6px}}.hero-chip{{border:1px solid var(--line);border-radius:18px;background:rgba(255,255,255,.72);padding:14px 16px}}.hero-chip strong{{display:block;margin-bottom:10px}}.config-row{{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid rgba(18,35,47,.08);font-size:.93rem}}.config-row:last-of-type{{border-bottom:none}}.config-row span{{color:var(--muted)}}.config-note{{margin-top:10px;font-size:.88rem;line-height:1.45}}.cards{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}}.metric-card{{background:rgba(255,255,255,.74);border:1px solid rgba(18,35,47,.08);border-radius:18px;padding:16px;display:grid;gap:10px}}.metric-top{{display:flex;justify-content:space-between;gap:10px;align-items:center}}.metric-label{{color:var(--muted);font-size:.82rem;letter-spacing:.06em;text-transform:uppercase}}.metric-value{{font-size:clamp(1.35rem,2.8vw,1.95rem);font-weight:700}}.status-pill{{display:inline-flex;border-radius:999px;padding:7px 12px;font-size:.76rem;font-weight:700;letter-spacing:.08em}}.status-pass{{background:rgba(45,143,133,.12);color:var(--teal)}}.status-warn{{background:rgba(217,119,6,.12);color:var(--amber)}}.status-fail{{background:rgba(209,73,91,.12);color:var(--red)}}.verdict-pass{{border-color:rgba(45,143,133,.28)}}.verdict-warn{{border-color:rgba(217,119,6,.28)}}.verdict-fail{{border-color:rgba(209,73,91,.28)}}.section-head{{display:flex;justify-content:space-between;gap:16px;align-items:end;margin-bottom:16px}}.media-grid,.two-col{{display:grid;gap:16px}}.media-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}.two-col{{grid-template-columns:1.2fr 1fr}}.panel{{background:rgba(255,255,255,.74);border:1px solid rgba(18,35,47,.08);border-radius:18px;padding:14px;overflow:visible;position:relative}}table{{width:100%;border-collapse:collapse;font-size:.95rem}}th,td{{padding:12px 14px;border-bottom:1px solid rgba(18,35,47,.08);text-align:left}}th{{background:rgba(18,35,47,.04);color:var(--muted);font-size:.78rem;text-transform:uppercase;letter-spacing:.06em}}tr:last-child td{{border-bottom:none}}.svg-wrap svg{{width:100%;height:auto;display:block}}code{{word-break:break-all}}@media (max-width:980px){{.cards,.media-grid,.two-col{{grid-template-columns:1fr}}.tooltip-content{{left:auto;right:0;bottom:calc(100% + 10px);transform:translateY(4px)}}.tooltip-content::after{{left:auto;right:10px;transform:rotate(45deg)}}.tooltip-below .tooltip-content{{top:calc(100% + 10px);bottom:auto;transform:translateY(-4px)}}.tooltip-below .tooltip-content::after{{left:auto;right:10px}}.tooltip:hover .tooltip-content,.tooltip:focus-within .tooltip-content,.tooltip-below:hover .tooltip-content,.tooltip-below:focus-within .tooltip-content{{transform:translateY(0)}}}}</style></head><body><div class='page'><header class='hero'><div class='eyebrow'>Structure-aware fastq QC</div><div class='hero-meta'><h1>{escape(summary['sample_name'])}</h1><p>Input FASTQ: <code>{escape(summary['fastq_path'])}</code></p><div class='assessment-line'><span>Overall assessment: {_status_pill(overall)}</span><span class='tooltip metric-tip-inline tooltip-below' tabindex='0' role='note' aria-label='Assessment guide help'><span class='tooltip-trigger'>Assessment guide</span><span class='tooltip-content'><strong>Assessment guide</strong><div>`PASS`: all tracked verdicts are within configured acceptable bounds.</div><div>`WARN`: at least one tracked verdict crossed a warning threshold, but none crossed a fail threshold.</div><div>`FAIL`: at least one tracked verdict crossed a fail threshold.</div><div style='margin-top:8px;'>Current verdicts: Long high-quality {summary['qc_verdicts']['long_high_quality_ratio']['status'].upper()}, Anchor order {summary['qc_verdicts']['correct_anchor_order_ratio']['status'].upper()}, No-anchor {summary['qc_verdicts']['no_anchor_ratio']['status'].upper()}, Reversed reads {summary['qc_verdicts']['reversed_read_ratio']['status'].upper()}, High-N {summary['qc_verdicts']['high_n_read_ratio']['status'].upper()}.</div></span></span></div></div></header><section><div class='section-head'><div><h2>Run Configuration</h2><p>Key user-provided parameters and runtime backend details.</p></div></div><div class='hero-chip'><strong>Configuration</strong>{config_items}<p class='config-note'>{escape(summary['rust_accelerator'].get('detail',''))}</p></div></section><section><div class='section-head'><div><h2>QC Verdicts</h2><p>Threshold-based pass, warn, fail calls for the core basic-QC indicators.</p></div></div><div class='cards'>{verdict_cards}</div></section><section><div class='section-head'><div><h2>Overview</h2><p>Yield, read quality, truncation, and contamination proxies at a glance.</p></div></div><div class='cards'>{overview_cards}</div></section><section><div class='section-head'><div><h2>Yield And Quality</h2><p>Baseline library quality by read length and Q-score distributions.</p></div></div><div class='media-grid'><div class='panel svg-wrap'>{_histogram([float(v) for v in lengths], "Read length distribution", "Read length (bp)")}</div><div class='panel svg-wrap'>{_histogram(base_qscores, "Overall base quality distribution", "Phred quality score", color="#2d8f85")}</div><div class='panel svg-wrap'>{_line_density(read_qscores, "Per-read Qscore density", "Read Qscore")}</div><div class='panel svg-wrap'>{_scatter(lengths, read_qscores, "Read length vs read Qscore")}</div></div></section><section><div class='section-head'><div><h2>Anchors</h2><p>Detection rate alone is not enough; mismatch burden and hit multiplicity expose weak motifs and internal artifacts.</p></div></div><div class='media-grid'><div class='panel svg-wrap'>{_bar_chart(list(summary['anchor_detection_ratio'].items()), "Anchor detection ratio", "Fraction of reads", color="#2364aa", percent=True)}</div><div class='panel svg-wrap'>{_bar_chart([(name, values['mean_best_mismatches']) for name, values in summary['anchor_quality_stats'].items()], "Anchor mismatch burden", "Mean best-hit mismatches", color="#d97706")}</div></div><div class='panel svg-wrap' style='margin-top:16px;'>{anchor_position_svg}</div><div class='panel' style='margin-top:16px;'><table><thead><tr><th>Anchor</th><th>{_tooltip_label('Detection ratio', metric_help['Detection ratio'])}</th><th>{_tooltip_label('Mean mismatches', metric_help['Mean mismatches'])}</th><th>{_tooltip_label('Multi-hit ratio', metric_help['Multi-hit ratio'])}</th><th>{_tooltip_label('Mean hits / positive read', metric_help['Mean hits / positive read'])}</th></tr></thead><tbody>{anchor_rows}</tbody></table></div></section><section><div class='section-head'><div><h2>Structure And Failure Modes</h2><p>Basic-QC only: structure integrity, truncation, orientation, and read-level hygiene.</p></div></div><div class='media-grid'><div class='panel svg-wrap'>{_bar_chart([(key, float(value)) for key, value in summary['structure_counts'].items()], "Read structure classification", "Read count", color="#2d8f85")}</div><div class='panel svg-wrap'>{_bar_chart([(key, float(value)) for key, value in summary['qc_bucket_counts'].items()], "QC failure buckets", "Read count", color="#d1495b")}</div></div><div class='panel svg-wrap' style='margin-top:16px;'>{_heatmap(read_results, "Read structure heatmap", heatmap_max_reads)}</div><div class='two-col' style='margin-top:16px;'><div class='panel'><h3>{_tooltip_label('QC Buckets', metric_help['QC Buckets'])}</h3><table><thead><tr><th>Bucket</th><th>Reads</th><th>Ratio</th></tr></thead><tbody>{bucket_rows}</tbody></table></div><div class='panel'><h3>{_tooltip_label('Structure Orientation', metric_help['Structure Orientation'])}</h3><table><thead><tr><th>Class</th><th>Orientation</th><th>Reads</th></tr></thead><tbody>{structure_rows}</tbody></table></div></div></section></div></body></html>"""
+    anchor_position_svg = _anchor_position_tracks(anchor_positions)
+    density_chart_id = "density-" + "".join(
+        ch if ch.isalnum() else "-" for ch in summary["sample_name"]
+    )
+    html = f"""<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>scfastq-qc report - {escape(summary['sample_name'])}</title><style>:root{{--bg:#f7f5ef;--paper:rgba(255,255,255,.84);--ink:#12232f;--muted:#5b6b78;--line:rgba(18,35,47,.1);--teal:#2d8f85;--amber:#d97706;--red:#d1495b;--shadow:0 18px 48px rgba(21,40,54,.1)}}*{{box-sizing:border-box}}body{{margin:0;font-family:'IBM Plex Sans','Segoe UI',sans-serif;color:var(--ink);background:radial-gradient(circle at top left, rgba(35,100,170,.12), transparent 26%),radial-gradient(circle at top right, rgba(45,143,133,.14), transparent 22%),linear-gradient(180deg,#f2efe5 0%,#fbfaf7 100%)}}.page{{max-width:1280px;margin:0 auto;padding:30px 18px 56px}}.hero,section{{background:var(--paper);border:1px solid var(--line);border-radius:24px;box-shadow:var(--shadow)}}.hero{{padding:26px}}section{{margin-top:22px;padding:22px;overflow:visible}}.eyebrow{{letter-spacing:.18em;text-transform:uppercase;color:var(--muted);font-size:.74rem;margin-bottom:10px}}h1{{font-family:Georgia,'Times New Roman',serif;font-size:clamp(2.1rem,4vw,3.4rem);margin:0 0 10px}}h2,h3{{margin:0}}p{{margin:0;color:var(--muted)}}.hero-meta{{display:grid;gap:10px}}.assessment-line{{display:flex;align-items:center;gap:10px;flex-wrap:wrap}}.tooltip{{position:relative;display:inline-flex;cursor:help;vertical-align:middle;z-index:2}}.metric-tip{{margin:0}}.metric-tip-inline{{display:inline-flex;align-items:center;justify-content:flex-start}}.tooltip-trigger{{display:inline;border-bottom:1px dashed rgba(35,100,170,.45);color:inherit;transition:border-color .16s ease,color .16s ease}}.tooltip:hover .tooltip-trigger,.tooltip:focus-within .tooltip-trigger{{border-bottom-color:#2364aa;color:#2364aa}}.tooltip-content{{position:absolute;left:50%;bottom:calc(100% + 12px);transform:translateX(-50%) translateY(4px);width:min(360px,80vw);padding:12px 14px;border-radius:16px;background:rgba(255,255,255,.98);border:1px solid rgba(18,35,47,.12);box-shadow:0 18px 48px rgba(21,40,54,.16);font-size:.86rem;line-height:1.5;color:var(--ink);opacity:0;pointer-events:none;transition:opacity .16s ease,transform .16s ease;z-index:50;text-align:left;text-transform:none;letter-spacing:normal;font-weight:400}}.tooltip-content::after{{content:'';position:absolute;left:50%;top:100%;width:12px;height:12px;background:rgba(255,255,255,.98);border-right:1px solid rgba(18,35,47,.12);border-bottom:1px solid rgba(18,35,47,.12);transform:translateX(-50%) rotate(45deg)}}.tooltip-below .tooltip-content{{top:calc(100% + 12px);bottom:auto;transform:translateX(-50%) translateY(-4px)}}.tooltip-below .tooltip-content::after{{top:auto;bottom:100%;border-right:none;border-bottom:none;border-left:1px solid rgba(18,35,47,.12);border-top:1px solid rgba(18,35,47,.12)}}.tooltip:hover .tooltip-content,.tooltip:focus-within .tooltip-content{{opacity:1;transform:translateX(-50%) translateY(0)}}.tooltip-below:hover .tooltip-content,.tooltip-below:focus-within .tooltip-content{{transform:translateX(-50%) translateY(0)}}.tooltip-content strong{{display:block;margin-bottom:6px}}.hero-chip{{border:1px solid var(--line);border-radius:18px;background:rgba(255,255,255,.72);padding:14px 16px}}.hero-chip strong{{display:block;margin-bottom:10px}}.config-row{{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid rgba(18,35,47,.08);font-size:.93rem}}.config-row:last-of-type{{border-bottom:none}}.config-row span{{color:var(--muted)}}.config-note{{margin-top:10px;font-size:.88rem;line-height:1.45}}.cards{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}}.metric-card{{background:rgba(255,255,255,.74);border:1px solid rgba(18,35,47,.08);border-radius:18px;padding:16px;display:grid;gap:10px}}.metric-top{{display:flex;justify-content:space-between;gap:10px;align-items:center}}.metric-label{{color:var(--muted);font-size:.82rem;letter-spacing:.06em;text-transform:uppercase}}.metric-value{{font-size:clamp(1.35rem,2.8vw,1.95rem);font-weight:700}}.status-pill{{display:inline-flex;border-radius:999px;padding:7px 12px;font-size:.76rem;font-weight:700;letter-spacing:.08em}}.status-pass{{background:rgba(45,143,133,.12);color:var(--teal)}}.status-warn{{background:rgba(217,119,6,.12);color:var(--amber)}}.status-fail{{background:rgba(209,73,91,.12);color:var(--red)}}.verdict-pass{{border-color:rgba(45,143,133,.28)}}.verdict-warn{{border-color:rgba(217,119,6,.28)}}.verdict-fail{{border-color:rgba(209,73,91,.28)}}.section-head{{display:flex;justify-content:space-between;gap:16px;align-items:end;margin-bottom:16px}}.media-grid,.two-col{{display:grid;gap:16px}}.media-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}.two-col{{grid-template-columns:1.2fr 1fr}}.panel{{background:rgba(255,255,255,.74);border:1px solid rgba(18,35,47,.08);border-radius:18px;padding:14px;overflow:visible;position:relative}}.chart-note{{margin-top:10px;font-size:.88rem;line-height:1.5;color:var(--muted)}}table{{width:100%;border-collapse:collapse;font-size:.95rem}}th,td{{padding:12px 14px;border-bottom:1px solid rgba(18,35,47,.08);text-align:left}}th{{background:rgba(18,35,47,.04);color:var(--muted);font-size:.78rem;text-transform:uppercase;letter-spacing:.06em}}tr:last-child td{{border-bottom:none}}.svg-wrap svg{{width:100%;height:auto;display:block}}.interactive-plot{{position:relative}}.plot-note{{margin:0 0 8px;color:var(--muted);font-size:.84rem}}.plot-tip{{position:absolute;z-index:5;padding:6px 8px;border-radius:10px;background:rgba(18,35,47,.92);color:#fff;font-size:.78rem;pointer-events:none;white-space:nowrap}}.heatmap-scroll{{overflow-y:auto;overflow-x:hidden;border:1px solid rgba(18,35,47,.08);border-radius:14px;background:rgba(255,255,255,.58)}}.heatmap-legend{{display:flex;flex-wrap:wrap;gap:10px 14px;margin:10px 0 4px}}.heatmap-legend-item{{display:inline-flex;align-items:center;gap:8px;font-size:.84rem;color:var(--muted)}}.heatmap-swatch{{width:14px;height:14px;border-radius:4px;border:1px solid rgba(18,35,47,.12);flex:0 0 auto}}code{{word-break:break-all}}@media (max-width:980px){{.cards,.media-grid,.two-col{{grid-template-columns:1fr}}.tooltip-content{{left:auto;right:0;bottom:calc(100% + 10px);transform:translateY(4px)}}.tooltip-content::after{{left:auto;right:10px;transform:rotate(45deg)}}.tooltip-below .tooltip-content{{top:calc(100% + 10px);bottom:auto;transform:translateY(-4px)}}.tooltip-below .tooltip-content::after{{left:auto;right:10px}}.tooltip:hover .tooltip-content,.tooltip:focus-within .tooltip-content,.tooltip-below:hover .tooltip-content,.tooltip-below:focus-within .tooltip-content{{transform:translateY(0)}}}}</style></head><body><div class='page'><header class='hero'><div class='eyebrow'>Structure-aware fastq QC</div><div class='hero-meta'><h1>{escape(summary['sample_name'])}</h1><p>Input FASTQ: <code>{escape(summary['fastq_path'])}</code></p><div class='assessment-line'><span>Overall assessment: {_status_pill(overall)}</span><span class='tooltip metric-tip-inline tooltip-below' tabindex='0' role='note' aria-label='Assessment guide help'><span class='tooltip-trigger'>Assessment guide</span><span class='tooltip-content'><strong>Assessment guide</strong><div>`PASS`: all tracked verdicts are within configured acceptable bounds.</div><div>`WARN`: at least one tracked verdict crossed a warning threshold, but none crossed a fail threshold.</div><div>`FAIL`: at least one tracked verdict crossed a fail threshold.</div><div style='margin-top:8px;'>Current verdicts: Long high-quality {summary['qc_verdicts']['long_high_quality_ratio']['status'].upper()}, Anchor order {summary['qc_verdicts']['correct_anchor_order_ratio']['status'].upper()}, No-anchor {summary['qc_verdicts']['no_anchor_ratio']['status'].upper()}, Reversed reads {summary['qc_verdicts']['reversed_read_ratio']['status'].upper()}, High-N {summary['qc_verdicts']['high_n_read_ratio']['status'].upper()}.</div></span></span></div></div></header><section><div class='section-head'><div><h2>Run Configuration</h2><p>Key user-provided parameters and runtime backend details.</p></div></div><div class='hero-chip'><strong>Configuration</strong>{config_items}<p class='config-note'>{escape(summary['rust_accelerator'].get('detail',''))}</p></div></section><section><div class='section-head'><div><h2>QC Verdicts</h2><p>Threshold-based pass, warn, fail calls for the core basic-QC indicators.</p></div></div><div class='cards'>{verdict_cards}</div></section><section><div class='section-head'><div><h2>Overview</h2><p>Yield, read quality, truncation, and contamination proxies at a glance.</p></div></div><div class='cards'>{overview_cards}</div></section><section><div class='section-head'><div><h2>Yield And Quality</h2><p>Baseline library quality by read length and Q-score distributions.</p></div></div><div class='media-grid'><div class='panel svg-wrap'>{_histogram([float(v) for v in lengths], "Read length distribution", "Read length (bp)")}<p class='chart-note'>Histogram of per-read lengths. Hover over each bar to inspect the bin span and how many reads fall into that interval.</p></div><div class='panel svg-wrap'>{_histogram(base_qscores, "Overall base quality distribution", "Phred quality score", color="#2d8f85")}<p class='chart-note'>Histogram of base-level Phred scores pooled across all bases from all reads. Hover over each bar to inspect the score interval and base count.</p></div><div class='panel svg-wrap'>{_line_density(read_qscores, "Per-read Qscore density", "Read Qscore", chart_id=density_chart_id)}</div><div class='panel svg-wrap'>{_scatter(lengths, read_qscores, "Read length vs read Qscore")}</div></div></section><section><div class='section-head'><div><h2>Anchors</h2><p>Detection rate alone is not enough; mismatch burden and hit multiplicity expose weak motifs and internal artifacts.</p></div></div><div class='media-grid'><div class='panel svg-wrap'>{_bar_chart(list(summary['anchor_detection_ratio'].items()), "Anchor detection ratio", "Fraction of reads", color="#2364aa", percent=True)}<p class='chart-note'>{escape(metric_help['Anchor detection ratio'])}</p></div><div class='panel svg-wrap'>{_bar_chart([(name, values['mean_best_mismatches']) for name, values in summary['anchor_quality_stats'].items()], "Anchor mismatch burden", "Mean best-hit mismatches", color="#d97706")}<p class='chart-note'>{escape(metric_help['Anchor mismatch burden'])}</p></div></div><div class='panel svg-wrap' style='margin-top:16px;'>{anchor_position_svg}<p class='chart-note'>{escape(metric_help['Anchor mean relative position'])}</p></div><div class='panel' style='margin-top:16px;'><table><thead><tr><th>Anchor</th><th>{_tooltip_label('Detection ratio', metric_help['Detection ratio'])}</th><th>{_tooltip_label('Mean mismatches', metric_help['Mean mismatches'])}</th><th>{_tooltip_label('Multi-hit ratio', metric_help['Multi-hit ratio'])}</th><th>{_tooltip_label('Mean hits / positive read', metric_help['Mean hits / positive read'])}</th></tr></thead><tbody>{anchor_rows}</tbody></table></div></section><section><div class='section-head'><div><h2>Structure And Failure Modes</h2><p>Basic-QC only: structure integrity, truncation, orientation, and read-level hygiene.</p></div></div><div class='media-grid'><div class='panel svg-wrap'>{_bar_chart([(key, float(value)) for key, value in summary['structure_counts'].items()], "Read structure classification", "Read count", color="#2d8f85")}</div><div class='panel svg-wrap'>{_bar_chart([(key, float(value)) for key, value in summary['qc_bucket_counts'].items()], "QC failure buckets", "Read count", color="#d1495b")}</div></div><div class='panel svg-wrap' style='margin-top:16px;'>{_heatmap(read_results, "Read structure heatmap", heatmap_max_reads)}</div><div class='two-col' style='margin-top:16px;'><div class='panel'><h3>{_tooltip_label('QC Buckets', metric_help['QC Buckets'])}</h3><table><thead><tr><th>Bucket</th><th>Reads</th><th>Ratio</th></tr></thead><tbody>{bucket_rows}</tbody></table></div><div class='panel'><h3>{_tooltip_label('Structure Orientation', metric_help['Structure Orientation'])}</h3><table><thead><tr><th>Class</th><th>Orientation</th><th>Reads</th></tr></thead><tbody>{structure_rows}</tbody></table></div></div></section></div></body></html>"""
     _write_text(path, html)

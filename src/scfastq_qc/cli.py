@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import logging
 from pathlib import Path
 
@@ -27,7 +28,11 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     run_parser = subparsers.add_parser("run", help="Run QC on a single FASTQ file")
-    run_parser.add_argument("--fastq", required=True, help="Input FASTQ/FASTQ.GZ file")
+    run_parser.add_argument(
+        "--fastq",
+        default=None,
+        help="Input FASTQ/FASTQ.GZ file (required when 'samples' is not provided in config)",
+    )
     run_parser.add_argument("--config", required=True, help="JSON config file")
     run_parser.add_argument("--outdir", required=True, help="Output directory")
     run_parser.add_argument(
@@ -39,8 +44,8 @@ def build_parser() -> argparse.ArgumentParser:
     batch_parser = subparsers.add_parser("batch", help="Run QC on multiple FASTQ files")
     batch_parser.add_argument(
         "--input",
-        required=True,
-        help="Input directory or file list (one path per line)",
+        default=None,
+        help="Input directory or file list (one path per line); required when 'samples' is not provided in config",
     )
     batch_parser.add_argument("--config", required=True, help="JSON config file")
     batch_parser.add_argument("--outdir", required=True, help="Output directory")
@@ -100,13 +105,47 @@ def main() -> None:
 
     if args.command == "run":
         config = load_config(args.config)
-        run_qc(args.fastq, config, args.outdir, export_csv=args.export_csv)
+        if config.samples:
+            from .batch import BatchProcessingError, run_batch_qc
+            if len(config.samples) == 1:
+                entry = config.samples[0]
+                effective_config = dataclasses.replace(config, sample_name=entry.sample_name)
+                run_qc(entry.path, effective_config, args.outdir, export_csv=args.export_csv)
+            else:
+                fastq_files = [Path(e.path) for e in config.samples]
+                sample_names: list[str | None] = [e.sample_name for e in config.samples]
+                try:
+                    run_batch_qc(
+                        fastq_files=fastq_files,
+                        config=config,
+                        outdir=args.outdir,
+                        parallel=1,
+                        continue_on_error=False,
+                        export_csv=args.export_csv,
+                        sample_names=sample_names,
+                    )
+                except BatchProcessingError as exc:
+                    logger.error("%s", exc)
+                    raise SystemExit(1) from None
+        else:
+            if not args.fastq:
+                parser.error("run: --fastq is required when 'samples' is not provided in config")
+            run_qc(args.fastq, config, args.outdir, export_csv=args.export_csv)
         return
 
     from .batch import BatchProcessingError, run_batch_qc
 
     config = load_config(args.config)
-    fastq_files = collect_fastq_files(args.input, args.pattern)
+
+    if config.samples and not args.input:
+        fastq_files = [Path(e.path) for e in config.samples]
+        batch_sample_names: list[str | None] = [e.sample_name for e in config.samples]
+    elif args.input:
+        fastq_files = collect_fastq_files(args.input, args.pattern)
+        batch_sample_names = []
+    else:
+        parser.error("batch: --input is required when 'samples' is not provided in config")
+
     try:
         run_batch_qc(
             fastq_files=fastq_files,
@@ -115,6 +154,7 @@ def main() -> None:
             parallel=args.parallel,
             continue_on_error=args.continue_on_error,
             export_csv=args.export_csv,
+            sample_names=batch_sample_names if batch_sample_names else None,
         )
     except BatchProcessingError as exc:
         logger.error("%s", exc)

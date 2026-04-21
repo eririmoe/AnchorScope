@@ -16,6 +16,12 @@ class AnchorConfig:
 
 
 @dataclass
+class SampleEntry:
+    sample_name: str
+    path: str
+
+
+@dataclass
 class StructureConfig:
     expected_order: list[str] = field(default_factory=list)
 
@@ -45,6 +51,7 @@ class ThresholdConfig:
 @dataclass
 class AppConfig:
     sample_name: str = "sample"
+    samples: list[SampleEntry] | None = None
     anchors: list[AnchorConfig] = field(default_factory=list)
     structure: StructureConfig = field(default_factory=StructureConfig)
     thresholds: ThresholdConfig = field(default_factory=ThresholdConfig)
@@ -59,8 +66,12 @@ def load_config(path: str | Path) -> AppConfig:
     qscore_method = raw.get("qscore_method", "conservative")
     if qscore_method not in ("conservative", "arithmetic_mean"):
         raise ValueError(f"qscore_method must be 'conservative' or 'arithmetic_mean', got '{qscore_method}'")
+    samples: list[SampleEntry] | None = None
+    if "samples" in raw:
+        samples = [SampleEntry(**entry) for entry in raw["samples"]]
     return AppConfig(
         sample_name=raw.get("sample_name", "sample"),
+        samples=samples,
         anchors=anchors,
         structure=structure,
         thresholds=thresholds,

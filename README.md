@@ -47,6 +47,8 @@ PYTHONPATH=src python -m scfastq_qc.cli --help
 
 ## Quick Start
 
+Single sample (classic):
+
 ```bash
 scfastq-qc run \
   --fastq examples/example.fastq \
@@ -56,6 +58,16 @@ scfastq-qc run \
 
 Open `out/report.html`.
 
+Multi-sample via config (no `--fastq` or `--input` needed):
+
+```bash
+scfastq-qc run \
+  --config examples/multi_sample_config.json \
+  --outdir out
+```
+
+Where `multi_sample_config.json` contains a `"samples"` list (see [Config File](#config-file) below). When two or more samples are listed, `run` automatically processes them in batch mode and writes `out/batch_report.html`.
+
 ## CLI Reference
 
 ### Global options
@@ -63,19 +75,29 @@ Open `out/report.html`.
 - `--log-file <path>`: optional log file
 - `--log-level <DEBUG|INFO|WARNING|ERROR|CRITICAL>`: default `INFO`
 
-### `run` (single sample)
+### `run` (single sample or multi-sample via config)
 
 ```bash
+# Classic: explicit fastq path
 scfastq-qc run \
   --fastq <reads.fastq|reads.fastq.gz> \
   --config <config.json> \
   --outdir <outdir> \
   [--export-csv]
+
+# Multi-sample: paths and names come from config "samples" list
+scfastq-qc run \
+  --config <config.json> \
+  --outdir <outdir> \
+  [--export-csv]
 ```
+
+`--fastq` is required only when the config does **not** contain a `"samples"` list. When `"samples"` has a single entry, single-sample mode runs. When `"samples"` has two or more entries, batch mode runs automatically.
 
 ### `batch` (multiple samples)
 
 ```bash
+# Classic: scan a directory or file-list
 scfastq-qc batch \
   --input <directory-or-filelist> \
   --config <config.json> \
@@ -84,7 +106,17 @@ scfastq-qc batch \
   [--parallel 4] \
   [--continue-on-error] \
   [--export-csv]
+
+# Config-driven: paths and names come from config "samples" list
+scfastq-qc batch \
+  --config <config.json> \
+  --outdir <outdir> \
+  [--parallel 4] \
+  [--continue-on-error] \
+  [--export-csv]
 ```
+
+`--input` is required only when the config does **not** contain a `"samples"` list. When `--input` is supplied alongside a config that also contains `"samples"`, the `--input` source takes precedence and sample names fall back to file stems.
 
 `--input` supports:
 
@@ -105,7 +137,11 @@ Important file-list behavior:
 
 ## Config File
 
-Example:
+Two config formats are supported. Both formats can include the same `anchors`, `structure`, `thresholds`, and `qscore_method` fields.
+
+### Format 1 — classic single-sample config
+
+Use `sample_name` (string) at the top level and supply the fastq path via `--fastq`:
 
 ```json
 {
@@ -129,27 +165,51 @@ Example:
   },
   "thresholds": {
     "long_read_min_bp": 1000,
-    "long_read_min_q": 10.0,
-    "heatmap_max_reads": 200,
-    "terminal_anchor_max_offset": 0.15,
-    "high_n_fraction": 0.10,
-    "warn_long_high_quality_ratio": 0.70,
-    "fail_long_high_quality_ratio": 0.50,
-    "warn_correct_anchor_order_ratio": 0.70,
-    "fail_correct_anchor_order_ratio": 0.50,
-    "warn_no_anchor_ratio": 0.20,
-    "fail_no_anchor_ratio": 0.35,
-    "warn_reversed_read_ratio": 0.30,
-    "fail_reversed_read_ratio": 0.50,
-    "warn_high_n_ratio": 0.10,
-    "fail_high_n_ratio": 0.20
+    "long_read_min_q": 10.0
   }
 }
 ```
 
+### Format 2 — multi-sample (samplesheet-style) config
+
+Replace `sample_name` with a `"samples"` list where each entry binds a name to a fastq path. No `--fastq` or `--input` flag is needed on the command line:
+
+```json
+{
+  "samples": [
+    {"sample_name": "sample1", "path": "data/sample1.fastq.gz"},
+    {"sample_name": "sample2", "path": "data/sample2.fastq.gz"}
+  ],
+  "qscore_method": "conservative",
+  "anchors": [
+    {
+      "name": "adapter_5p",
+      "type": "fixed",
+      "sequence": "ACGTACGT",
+      "max_mismatches": 1
+    },
+    {
+      "name": "polyT",
+      "type": "regex",
+      "pattern": "T{6,}"
+    }
+  ],
+  "structure": {
+    "expected_order": ["adapter_5p", "polyT"]
+  },
+  "thresholds": {
+    "long_read_min_bp": 1000,
+    "long_read_min_q": 10.0
+  }
+}
+```
+
+When `"samples"` has one entry, `run` processes it as a single sample (output: `report.html`, `summary.json`). When it has two or more entries, `run` / `batch` automatically processes all of them in batch (output: per-sample subdirectories + `batch_report.html`, `batch_summary.json`).
+
 ### Top-level fields
 
-- `sample_name`: label shown in report
+- `sample_name`: label shown in report (Format 1 only; ignored if `"samples"` is present)
+- `samples`: list of `{"sample_name": "...", "path": "..."}` entries (Format 2)
 - `qscore_method`: `conservative` or `arithmetic_mean`
 - `anchors`: anchor definitions
 - `structure.expected_order`: expected left-to-right anchor order

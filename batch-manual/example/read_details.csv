@@ -1,5 +1,0 @@
-Read ID,Read Length,Read Qscore,Structure Label,Is Reversed,Order Valid,5p Complete,3p Complete,N Fraction,Invalid Base Fraction,Failure Reasons,Detected Anchors
-read1,26,40.00,full_structure,False,True,False,False,0.0000,0.0000,,
-read2,25,39.00,full_structure,False,True,False,False,0.0000,0.0000,,
-read3,25,37.00,missing_5p_anchor,False,False,False,False,0.0000,0.0000,,
-read4,20,40.00,missing_3p_anchor,False,False,False,False,0.0000,0.0000,,

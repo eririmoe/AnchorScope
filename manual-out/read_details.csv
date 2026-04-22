@@ -1,5 +1,0 @@
-Read ID,Read Length,Read Qscore,Structure Label,QC Bucket,QC Flags,Is Reversed,Order Valid,5p Offset,3p Offset,N Fraction,Invalid Base Fraction,Anchor Count
-read1,26,40.00,full_structure,three_prime_truncated,three_prime_truncated,False,True,0.0000,0.1538,0.0000,0.0000,2
-read2,25,39.00,full_structure,pass,,False,True,0.0000,0.0000,0.0000,0.0000,2
-read3,25,37.00,missing_5p_anchor,missing_5p,missing_5p,False,False,,0.0000,0.0000,0.0000,1
-read4,20,40.00,missing_3p_anchor,missing_3p,missing_3p,False,False,0.0000,,0.0000,0.0000,1

@@ -19,7 +19,6 @@
   },
   "thresholds": {
     "long_read_min_bp": 20,
-    "long_read_min_q": 20,
-    "heatmap_max_reads": 100
+    "long_read_min_q": 20
   }
 }

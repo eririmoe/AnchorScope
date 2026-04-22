@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -30,10 +33,6 @@ class StructureConfig:
 class ThresholdConfig:
     long_read_min_bp: int = 1000
     long_read_min_q: float = 10.0
-    heatmap_max_reads: int = 200
-    end_proximity_bp: int = 150
-    end_proximity_fraction: float = 0.15
-    max_n_fraction: float = 0.10
     terminal_anchor_max_offset: float = 0.15
     high_n_fraction: float = 0.1
     warn_long_high_quality_ratio: float = 0.7
@@ -63,7 +62,22 @@ def load_config(path: str | Path) -> AppConfig:
     raw: dict[str, Any] = json.loads(Path(path).read_text(encoding="utf-8"))
     anchors = [AnchorConfig(**anchor) for anchor in raw.get("anchors", [])]
     structure = StructureConfig(**raw.get("structure", {}))
-    thresholds = ThresholdConfig(**raw.get("thresholds", {}))
+    threshold_values = dict(raw.get("thresholds", {}))
+    legacy_threshold_keys = {
+        "heatmap_max_reads",
+        "end_proximity_bp",
+        "end_proximity_fraction",
+        "max_n_fraction",
+    }
+    ignored_legacy_keys = sorted(key for key in legacy_threshold_keys if key in threshold_values)
+    for key in ignored_legacy_keys:
+        threshold_values.pop(key, None)
+    if ignored_legacy_keys:
+        logger.warning(
+            "Ignoring legacy threshold setting(s) that are no longer used by the report pipeline: %s",
+            ", ".join(ignored_legacy_keys),
+        )
+    thresholds = ThresholdConfig(**threshold_values)
     qscore_method = raw.get("qscore_method", "conservative")
     if qscore_method not in ("conservative", "arithmetic_mean"):
         raise ValueError(f"qscore_method must be 'conservative' or 'arithmetic_mean', got '{qscore_method}'")

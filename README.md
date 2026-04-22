@@ -229,7 +229,6 @@ Current defaults from code:
 
 - `long_read_min_bp`: `1000`
 - `long_read_min_q`: `10.0`
-- `heatmap_max_reads`: `200`
 - `terminal_anchor_max_offset`: `0.15`
 - `high_n_fraction`: `0.10`
 - `warn_long_high_quality_ratio`: `0.70`
@@ -242,10 +241,8 @@ Current defaults from code:
 - `fail_reversed_read_ratio`: `0.50`
 - `warn_high_n_ratio`: `0.10`
 - `fail_high_n_ratio`: `0.20`
-- compatibility fields currently retained in config model:
-  - `end_proximity_bp` (default `150`)
-  - `end_proximity_fraction` (default `0.15`)
-  - `max_n_fraction` (default `0.10`)
+
+Legacy threshold keys such as `heatmap_max_reads`, `end_proximity_bp`, `end_proximity_fraction`, and `max_n_fraction` are no longer used by the current report pipeline. If they still appear in an old config file, they are ignored with a warning during config load.
 
 ## QC Verdicts and How to Tune Them
 

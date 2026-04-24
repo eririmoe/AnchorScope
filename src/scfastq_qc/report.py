@@ -192,7 +192,7 @@ def _scale(value: float, lower: float, upper: float, span: float) -> float:
 
 
 def _svg_wrapper(title: str, body: str, width: int = 780, height: int = 320) -> str:
-    return f"<svg xmlns='http://www.w3.org/2000/svg' width='{width}' height='{height}' viewBox='0 0 {width} {height}'><style>text{{font-family:IBM Plex Sans,Segoe UI,sans-serif;fill:#12232f}}.grid{{stroke:#d7e0e6;stroke-width:1}}.axis{{stroke:#304252;stroke-width:1}}.bar{{rx:5;ry:5}}</style><text x='18' y='28' font-size='20' font-weight='700'>{escape(title)}</text>{body}</svg>"
+    return f"<svg xmlns='http://www.w3.org/2000/svg' role='figure' aria-label='{escape(title)}' width='{width}' height='{height}' viewBox='0 0 {width} {height}'><style>text{{font-family:IBM Plex Sans,Segoe UI,sans-serif;fill:#12232f}}.grid{{stroke:#d7e0e6;stroke-width:1}}.axis{{stroke:#304252;stroke-width:1}}.bar{{rx:5;ry:5}}</style><text x='18' y='28' font-size='20' font-weight='700'>{escape(title)}</text>{body}</svg>"
 
 
 def _format_axis_value(value: float, percent: bool = False) -> str:
@@ -209,6 +209,27 @@ def _linear_ticks(lower: float, upper: float, steps: int = 5) -> list[float]:
     if upper <= lower:
         return [lower]
     return [lower + ((upper - lower) * idx / steps) for idx in range(steps + 1)]
+
+
+def _smooth_svg_path(points: list[tuple[float, float]]) -> str:
+    if not points:
+        return ""
+    if len(points) < 3:
+        return "M " + " L ".join(f"{x:.2f},{y:.2f}" for x, y in points)
+    path = [f"M {points[0][0]:.2f},{points[0][1]:.2f}"]
+    for idx in range(len(points) - 1):
+        p0 = points[idx - 1] if idx > 0 else points[idx]
+        p1 = points[idx]
+        p2 = points[idx + 1]
+        p3 = points[idx + 2] if idx + 2 < len(points) else p2
+        cp1x = p1[0] + (p2[0] - p0[0]) / 6
+        cp1y = p1[1] + (p2[1] - p0[1]) / 6
+        cp2x = p2[0] - (p3[0] - p1[0]) / 6
+        cp2y = p2[1] - (p3[1] - p1[1]) / 6
+        path.append(
+            f"C {cp1x:.2f},{cp1y:.2f} {cp2x:.2f},{cp2y:.2f} {p2[0]:.2f},{p2[1]:.2f}"
+        )
+    return " ".join(path)
 
 
 def _histogram(values: list[float] | dict[float, int], title: str, xlabel: str, color: str = COLOR_QUALITY, bins: int = 20) -> str:
@@ -272,18 +293,19 @@ def _histogram(values: list[float] | dict[float, int], title: str, xlabel: str, 
         f"const root=document.getElementById('{escape(chart_id)}');"
         f"if(!root) return;"
         f"const tip=document.getElementById('{escape(chart_id)}-tip');"
-        f"for(const node of root.querySelectorAll('.hist-bar-target')){{"
-        f"node.addEventListener('mouseenter', function(){{"
+        f"root.addEventListener('mousemove', function(e){{"
+        f"const target=e.target.closest('.hist-bar-target');"
+        f"if(target){{"
         f"tip.hidden=false;"
-        f"tip.textContent='Range '+this.dataset.range+' | count '+this.dataset.count;"
-        f"}});"
-        f"node.addEventListener('mousemove', function(event){{"
+        f"tip.textContent='Range '+target.dataset.range+' | count '+target.dataset.count;"
         f"const box=root.getBoundingClientRect();"
-        f"tip.style.left=(event.clientX-box.left+14)+'px';"
-        f"tip.style.top=(event.clientY-box.top-10)+'px';"
-        f"}});"
-        f"node.addEventListener('mouseleave', function(){{ tip.hidden=true; }});"
+        f"tip.style.left=(e.clientX-box.left+14)+'px';"
+        f"tip.style.top=(e.clientY-box.top-10)+'px';"
+        f"}}else{{"
+        f"tip.hidden=true;"
         f"}}"
+        f"}});"
+        f"root.addEventListener('mouseleave', function(){{ tip.hidden=true; }});"
         f"}})();</script>"
     )
 
@@ -311,7 +333,7 @@ def _line_density(values: list[float] | dict[float, int], title: str, xlabel: st
         counts[min(bin_count - 1, max(0, int((value - lower) / bin_width)))] += count
     densities = [count / (total_points * bin_width) for count in counts]
     y_max = max(densities) * 1.1 if densities else 1.0
-    points = []
+    points: list[tuple[float, float]] = []
     hover_targets: list[str] = []
     x_ticks = _linear_ticks(lower, upper, 5)
     y_ticks = _linear_ticks(0, y_max, 5)
@@ -328,16 +350,24 @@ def _line_density(values: list[float] | dict[float, int], title: str, xlabel: st
         x_value = lower + (idx + 0.5) * bin_width
         x = left + _scale(x_value, lower, upper, plot_w)
         y = top + plot_h - _scale(density, 0, y_max, plot_h)
-        points.append(f"{x:.2f},{y:.2f}")
+        points.append((x, y))
         hover_targets.append(
             f"<circle class='density-point' data-q='{x_value:.2f}' data-density='{density:.4f}' cx='{x:.2f}' cy='{y:.2f}' r='5' fill='{color}' fill-opacity='0.01' stroke='transparent'/>"
         )
         parts.append(f"<circle cx='{x:.2f}' cy='{y:.2f}' r='2.3' fill='{color}'/>")
+    line_path = _smooth_svg_path(points)
+    area_path = (
+        f"M {left:.2f},{top + plot_h:.2f} "
+        + line_path[2:]
+        + f" L {left + plot_w:.2f},{top + plot_h:.2f} Z"
+        if line_path
+        else ""
+    )
     body = (
         f"<line class='axis' x1='{left}' y1='{top+plot_h}' x2='{left+plot_w}' y2='{top+plot_h}'/>"
         f"<line class='axis' x1='{left}' y1='{top}' x2='{left}' y2='{top+plot_h}'/>"
-        f"<polygon points='{left},{top+plot_h} {' '.join(points)} {left+plot_w},{top+plot_h}' fill='{color}' fill-opacity='0.16'/>"
-        f"<polyline fill='none' stroke='{color}' stroke-width='2.5' points='{' '.join(points)}'/>"
+        f"<path d='{area_path}' fill='{color}' fill-opacity='0.16' stroke='none'/>"
+        f"<path d='{line_path}' fill='none' stroke='{color}' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/>"
         f"{''.join(parts)}"
         f"{''.join(hover_targets)}"
         f"<text x='{width/2:.0f}' y='{height-12}' text-anchor='middle' font-size='12'>{escape(xlabel)}</text>"
@@ -355,18 +385,19 @@ def _line_density(values: list[float] | dict[float, int], title: str, xlabel: st
         f"const root=document.getElementById('{escape(chart_id)}');"
         f"if(!root) return;"
         f"const tip=document.getElementById('{escape(chart_id)}-tip');"
-        f"for(const node of root.querySelectorAll('.density-point')){{"
-        f"node.addEventListener('mouseenter', function(){{"
+        f"root.addEventListener('mousemove', function(e){{"
+        f"const target=e.target.closest('.density-point');"
+        f"if(target){{"
         f"tip.hidden=false;"
-        f"tip.textContent='Qscore '+this.dataset.q+' | density '+this.dataset.density;"
-        f"}});"
-        f"node.addEventListener('mousemove', function(event){{"
+        f"tip.textContent='Qscore '+target.dataset.q+' | density '+target.dataset.density;"
         f"const box=root.getBoundingClientRect();"
-        f"tip.style.left=(event.clientX-box.left+14)+'px';"
-        f"tip.style.top=(event.clientY-box.top-10)+'px';"
-        f"}});"
-        f"node.addEventListener('mouseleave', function(){{ tip.hidden=true; }});"
+        f"tip.style.left=(e.clientX-box.left+14)+'px';"
+        f"tip.style.top=(e.clientY-box.top-10)+'px';"
+        f"}}else{{"
+        f"tip.hidden=true;"
         f"}}"
+        f"}});"
+        f"root.addEventListener('mouseleave', function(){{ tip.hidden=true; }});"
         f"}})();</script>"
     )
 
@@ -489,18 +520,19 @@ def _scatter_binned(scatter_counts: Counter[tuple[int, int]], title: str) -> str
         f"const root=document.getElementById('{escape(chart_id)}');"
         f"if(!root) return;"
         f"const tip=document.getElementById('{escape(chart_id)}-tip');"
-        f"for(const node of root.querySelectorAll('.scatter-point-target')){{"
-        f"node.addEventListener('mouseenter', function(){{"
+        f"root.addEventListener('mousemove', function(e){{"
+        f"const target=e.target.closest('.scatter-point-target');"
+        f"if(target){{"
         f"tip.hidden=false;"
-        f"tip.textContent='Length '+this.dataset.length+' | Qscore '+this.dataset.qscore+' | reads '+this.dataset.count;"
-        f"}});"
-        f"node.addEventListener('mousemove', function(event){{"
+        f"tip.textContent='Length '+target.dataset.length+' | Qscore '+target.dataset.qscore+' | reads '+target.dataset.count;"
         f"const box=root.getBoundingClientRect();"
-        f"tip.style.left=(event.clientX-box.left+14)+'px';"
-        f"tip.style.top=(event.clientY-box.top-10)+'px';"
-        f"}});"
-        f"node.addEventListener('mouseleave', function(){{ tip.hidden=true; }});"
+        f"tip.style.left=(e.clientX-box.left+14)+'px';"
+        f"tip.style.top=(e.clientY-box.top-10)+'px';"
+        f"}}else{{"
+        f"tip.hidden=true;"
         f"}}"
+        f"}});"
+        f"root.addEventListener('mouseleave', function(){{ tip.hidden=true; }});"
         f"}})();</script>"
     )
 
@@ -641,10 +673,57 @@ def _tooltip_label(label: str, body: str) -> str:
     )
 
 
-def run_qc(fastq_path: str, config: AppConfig, outdir: str, export_csv: bool = False) -> dict[str, Any]:
+def _process_single_read(
+    read: FastqRead,
+    prepared_anchors: list,
+    config: AppConfig,
+) -> dict[str, Any]:
+    """Process a single read: anchor search, classification, QC flags/bucket.
+
+    Returns a lightweight dict with all per-read results needed for aggregation.
+    """
+    forward_hits = find_anchor_hits(read.sequence, prepared_anchors)
+    reverse_hits = find_anchor_hits(reverse_complement(read.sequence), prepared_anchors)
+    structure, hits = classify_best_orientation(forward_hits, reverse_hits, config.structure.expected_order)
+    best_hits = _best_hits_by_anchor(hits)
+    five_prime_offset, three_prime_offset = _compute_terminal_offsets(best_hits, config.structure.expected_order, read.length)
+    qc_flags = _derive_qc_flags(read, structure.label, five_prime_offset, three_prime_offset, config, hits)
+    qc_bucket = _primary_qc_bucket(qc_flags)
+    orientation = "reversed" if structure.is_reversed else "forward"
+    return {
+        "structure": structure,
+        "hits": hits,
+        "best_hits": best_hits,
+        "five_prime_offset": five_prime_offset,
+        "three_prime_offset": three_prime_offset,
+        "qc_flags": qc_flags,
+        "qc_bucket": qc_bucket,
+        "orientation": orientation,
+    }
+
+
+def run_qc(
+    fastq_path: str,
+    config: AppConfig,
+    outdir: str,
+    export_csv: bool = False,
+    output_passed_fastq: bool = False,
+    output_failed_fastq: bool = False,
+    threads: int = 1,
+) -> dict[str, Any]:
     out_path = Path(outdir)
     out_path.mkdir(parents=True, exist_ok=True)
     prepared_anchors = prepare_anchors(config.anchors)
+
+    if threads > 1:
+        from .parallel import run_qc_parallel
+        return run_qc_parallel(
+            fastq_path, config, outdir,
+            export_csv=export_csv,
+            output_passed_fastq=output_passed_fastq,
+            output_failed_fastq=output_failed_fastq,
+            threads=threads,
+        )
 
     length_counts: Counter[int] = Counter()
     base_qscore_counts: Counter[int] = Counter()
@@ -660,6 +739,7 @@ def run_qc(fastq_path: str, config: AppConfig, outdir: str, export_csv: bool = F
     qc_bucket_counts: Counter[str] = Counter()
     total_reads = total_bases = long_high_quality = order_valid_count = reversed_read_count = 0
     five_prime_truncation_count = three_prime_truncation_count = high_n_read_count = invalid_base_read_count = 0
+    passed_reads_exported = failed_reads_exported = 0
 
     read_details_handle = anchor_hits_handle = None
     read_details_writer = anchor_hits_writer = None
@@ -702,8 +782,14 @@ def run_qc(fastq_path: str, config: AppConfig, outdir: str, export_csv: bool = F
         )
 
     fastq_export_handles: dict[str, Any] = {}
+    passed_fastq_handle = None
+    failed_fastq_handle = None
 
     try:
+        if output_passed_fastq:
+            passed_fastq_handle = open(out_path / "passed.fastq", "w", encoding="utf-8")
+        if output_failed_fastq:
+            failed_fastq_handle = open(out_path / "failed.fastq", "w", encoding="utf-8")
         for read in read_fastq(fastq_path, qscore_method=config.qscore_method):
             total_reads += 1
             total_bases += read.length
@@ -715,14 +801,15 @@ def run_qc(fastq_path: str, config: AppConfig, outdir: str, export_csv: bool = F
             scatter_qscore = round(round(read.read_qscore / SCATTER_QSCORE_BIN) * SCATTER_QSCORE_BIN, 2)
             scatter_counts[(scatter_length, scatter_qscore)] += 1
 
-            forward_hits = find_anchor_hits(read.sequence, prepared_anchors)
-            reverse_hits = find_anchor_hits(reverse_complement(read.sequence), prepared_anchors)
-            structure, hits = classify_best_orientation(forward_hits, reverse_hits, config.structure.expected_order)
-            best_hits = _best_hits_by_anchor(hits)
-            five_prime_offset, three_prime_offset = _compute_terminal_offsets(best_hits, config.structure.expected_order, read.length)
-            qc_flags = _derive_qc_flags(read, structure.label, five_prime_offset, three_prime_offset, config, hits)
-            qc_bucket = _primary_qc_bucket(qc_flags)
-            orientation = "reversed" if structure.is_reversed else "forward"
+            result = _process_single_read(read, prepared_anchors, config)
+            structure = result["structure"]
+            hits = result["hits"]
+            best_hits = result["best_hits"]
+            five_prime_offset = result["five_prime_offset"]
+            three_prime_offset = result["three_prime_offset"]
+            qc_flags = result["qc_flags"]
+            qc_bucket = result["qc_bucket"]
+            orientation = result["orientation"]
 
             structure_counts[structure.label] += 1
             structure_orientation_counts[(structure.label, orientation)] += 1
@@ -808,6 +895,13 @@ def run_qc(fastq_path: str, config: AppConfig, outdir: str, export_csv: bool = F
                     handle = open(out_path / f"{structure.label}.fastq", "w", encoding="utf-8")
                     fastq_export_handles[structure.label] = handle
                 handle.write(f"@{read.name}\n{read.sequence}\n+\n{read.quality}\n")
+
+            if qc_bucket == "pass" and passed_fastq_handle is not None:
+                passed_fastq_handle.write(f"@{read.name}\n{read.sequence}\n+\n{read.quality}\n")
+                passed_reads_exported += 1
+            if qc_bucket != "pass" and failed_fastq_handle is not None:
+                failed_fastq_handle.write(f"@{read.name}\n{read.sequence}\n+\n{read.quality}\n")
+                failed_reads_exported += 1
     finally:
         if read_details_handle is not None:
             read_details_handle.close()
@@ -815,6 +909,10 @@ def run_qc(fastq_path: str, config: AppConfig, outdir: str, export_csv: bool = F
             anchor_hits_handle.close()
         for handle in fastq_export_handles.values():
             handle.close()
+        if passed_fastq_handle is not None:
+            passed_fastq_handle.close()
+        if failed_fastq_handle is not None:
+            failed_fastq_handle.close()
 
     anchor_quality_stats: dict[str, dict[str, float]] = {}
     for anchor in config.anchors:
@@ -862,6 +960,8 @@ def run_qc(fastq_path: str, config: AppConfig, outdir: str, export_csv: bool = F
         "qc_bucket_counts": qc_bucket_counts_dict,
         "qc_bucket_ratios": {bucket: (count / total_reads) if total_reads else 0.0 for bucket, count in qc_bucket_counts_dict.items()},
         "rust_accelerator": get_rust_status(),
+        "passed_reads_exported": passed_reads_exported if output_passed_fastq else None,
+        "failed_reads_exported": failed_reads_exported if output_failed_fastq else None,
     }
     summary["qc_verdicts"] = _build_qc_verdicts(summary, config.thresholds)
     _write_text(out_path / "summary.json", json.dumps(summary, indent=2))

@@ -88,14 +88,19 @@ def _write_batch_report(summary: dict[str, Any], outdir: Path) -> None:
     _write_batch_html_report(summary, outdir)
 
 
-def run_qc_single(args: tuple[Path, AppConfig, Path, bool, str | None]) -> dict[str, Any]:
+def run_qc_single(args: tuple[Path, AppConfig, Path, bool, bool, bool, str | None]) -> dict[str, Any]:
     """Process a single FASTQ file for batch execution."""
-    fastq_path, config, outdir, export_csv, sample_name = args
+    fastq_path, config, outdir, export_csv, output_passed_fastq, output_failed_fastq, sample_name = args
     effective_name = sample_name if sample_name is not None else fastq_path.stem
     effective_config = dataclasses.replace(config, sample_name=effective_name)
     try:
         logger.info("Processing: %s", fastq_path)
-        summary = run_qc(str(fastq_path), effective_config, str(outdir), export_csv=export_csv)
+        summary = run_qc(
+            str(fastq_path), effective_config, str(outdir),
+            export_csv=export_csv,
+            output_passed_fastq=output_passed_fastq,
+            output_failed_fastq=output_failed_fastq,
+        )
         logger.info("Completed: %s", fastq_path)
         return {"file": str(fastq_path), "status": "success", "summary": summary}
     except Exception as exc:
@@ -119,15 +124,17 @@ def _build_batch_tasks(
     output_root: Path,
     export_csv: bool,
     continue_on_error: bool,
+    output_passed_fastq: bool = False,
+    output_failed_fastq: bool = False,
     sample_names: list[str | None] | None = None,
-) -> tuple[list[tuple[Path, AppConfig, Path, bool, str | None]], list[dict[str, Any]]]:
+) -> tuple[list[tuple[Path, AppConfig, Path, bool, bool, bool, str | None]], list[dict[str, Any]]]:
     if sample_names is not None and len(sample_names) != len(fastq_files):
         raise ValueError(
             "sample_names length must match fastq_files length: "
             f"{len(sample_names)} != {len(fastq_files)}"
         )
 
-    tasks: list[tuple[Path, AppConfig, Path, bool, str | None]] = []
+    tasks: list[tuple[Path, AppConfig, Path, bool, bool, bool, str | None]] = []
     failures: list[dict[str, Any]] = []
     used_output_names: set[str] = set()
 
@@ -144,7 +151,7 @@ def _build_batch_tasks(
             continue
 
         file_outdir = _allocate_output_dir(output_root, base_name, used_output_names)
-        tasks.append((fastq_path, config, file_outdir, export_csv, sample_name))
+        tasks.append((fastq_path, config, file_outdir, export_csv, output_passed_fastq, output_failed_fastq, sample_name))
 
     return tasks, failures
 
@@ -156,13 +163,20 @@ def run_batch_qc(
     parallel: int = 1,
     continue_on_error: bool = False,
     export_csv: bool = False,
+    output_passed_fastq: bool = False,
+    output_failed_fastq: bool = False,
     sample_names: list[str | None] | None = None,
 ) -> list[dict[str, Any]]:
     """Run QC across multiple FASTQ files."""
     out_path = Path(outdir)
     out_path.mkdir(parents=True, exist_ok=True)
 
-    tasks, results = _build_batch_tasks(fastq_files, config, out_path, export_csv, continue_on_error, sample_names)
+    tasks, results = _build_batch_tasks(
+        fastq_files, config, out_path, export_csv, continue_on_error,
+        output_passed_fastq=output_passed_fastq,
+        output_failed_fastq=output_failed_fastq,
+        sample_names=sample_names,
+    )
     logger.info("Starting batch processing: %s files", len(tasks))
 
     if tasks and (continue_on_error or not results):

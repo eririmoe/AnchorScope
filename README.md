@@ -1,384 +1,244 @@
 # scfastq-qc
 
-Structure-aware FASTQ basic QC for single-cell long-read libraries.
+`scfastq-qc` is a high-performance, structure-aware Quality Control (QC) and filtering tool designed specifically for single-cell long-read sequencing libraries. 
 
-This tool is intentionally scoped to **basic QC** at FASTQ level: read yield/quality, anchor detection, structure integrity, truncation signals, orientation, and failure buckets. It does **not** perform alignment, barcode correction, UMI deduplication, isoform quantification, or cell annotation.
+Unlike traditional bulk FASTQ QC tools, `scfastq-qc` understands the molecular structure of single-cell libraries. It actively searches for expected sequences (like adapters, polyA tails, cell barcodes) to classify each read, providing deep insights into library construction success, structural integrity, and overall sequencing quality.
 
-## What It Produces
+## Key Features
 
-For a single sample (`run`):
+*   **Structure-Aware QC**: Identifies expected motifs (Anchors) using exact match with mismatches or regex patterns.
+*   **Orientation Agnostic**: Automatically checks both forward and reverse-complement strands to determine the true orientation of each read.
+*   **Interactive HTML Reports**: Generates self-contained, interactive visualizations without external web dependencies.
+*   **Batch Processing**: Natively supports processing multiple samples concurrently.
+*   **Parallel Acceleration**: Utilizes multi-processing to significantly speed up single-file processing (`--threads`).
+*   **FASTQ Filtering**: Optionally splits reads into `passed.fastq` and `failed.fastq` based on comprehensive QC verdicts.
+*   **Rust Acceleration**: Includes an optional Rust core to dramatically accelerate anchor searching.
 
-- `report.html`: self-contained HTML report (inline figures)
-- `summary.json`: machine-readable metrics and verdicts
-- optional CSVs when `--export-csv` is enabled:
-  - `summary.csv`
-  - `structure_classification.csv`
-  - `read_details.csv`
-  - `anchor_hits.csv`
+---
 
-For batch mode (`batch`):
+## Installation
 
-- per-sample subdirectories (each contains its own `report.html` and `summary.json`)
-- `batch_summary.json`
-- `batch_report.html`
+### Prerequisites
+*   Python 3.10+
+*   (Optional but recommended) Rust toolchain for the high-speed search accelerator.
 
-## Install (Linux)
-
-Python `>=3.10` is required.
+### 1. Build the Rust Accelerator (Highly Recommended)
+Building the Rust module provides a massive speedup for anchor searching.
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -U pip
+cd rust/anchor_engine
+cargo build --release
+```
+Then, set the environment variable to point to the compiled library before running the tool:
+*   **Linux**: `export SCFASTQ_QC_RUST_LIB=$(pwd)/target/release/libanchor_engine.so`
+*   **macOS**: `export SCFASTQ_QC_RUST_LIB=$(pwd)/target/release/libanchor_engine.dylib`
+*   **Windows**: `$env:SCFASTQ_QC_RUST_LIB = "$PWD\target\release\anchor_engine.dll"`
+
+### 2. Install the Python Package
+```bash
 pip install -e .
 ```
 
-Then run via entrypoint:
+---
 
-```bash
-scfastq-qc --help
-```
+## Core Concepts
 
-Alternative (without editable install):
+Understanding how `scfastq-qc` processes reads is key to configuring it correctly.
 
-```bash
-PYTHONPATH=src python -m scfastq_qc.cli --help
-```
+### 1. Anchors
+An **Anchor** is a known sequence motif expected to be present in your library (e.g., a 5' adapter, a 3' adapter, or a polyA tail).
+*   **Fixed Anchors**: Defined by a specific DNA sequence and a maximum number of allowed mismatches.
+*   **Regex Anchors**: Defined by a regular expression (e.g., `A{8,}` for a polyA tail).
 
-## Quick Start
+**Anchor Matching Principles:**
+1.  **Fuzzy Searching**: For fixed anchors, the tool performs a sliding-window fuzzy search. If `max_mismatches` > 0, it allows up to that many substitutions, insertions, or deletions to still consider it a match. This is crucial for long-read data (like Oxford Nanopore) which inherently has a higher base error rate.
+2.  **Rust Acceleration**: To handle the computationally expensive fuzzy matching across millions of long reads, `scfastq-qc` utilizes a highly optimized Rust core (when compiled), resulting in massive speedups over pure Python implementations.
+3.  **Best Hit Selection**: If a specific anchor motif appears multiple times in a single read, the tool intelligently selects the "best hit"—prioritizing the match with the fewest mismatches.
+4.  **Strand Agnostic**: Because single-cell long-read libraries often sequence both the forward and reverse-complement strands randomly, the anchor matching runs twice for every read: once on the raw sequence, and once on its reverse-complement. The strand that yields the most complete and correctly ordered set of anchors is determined to be the true biological orientation.
 
-Single sample (classic):
+### 2. Structure Classification
+`scfastq-qc` scans every read (and its reverse complement) for all defined anchors. Based on what it finds, it assigns a **Structure Label**:
+*   `full_structure`: All expected anchors were found.
+*   `missing_<anchor_name>`: Specific anchors were not found.
+*   `unexpected_order`: Anchors were found, but not in the order you defined.
+*   `no_anchor`: None of the anchors were found.
 
-```bash
-scfastq-qc run \
-  --fastq examples/example.fastq \
-  --config examples/config.json \
-  --outdir out
-```
+### 3. QC Buckets
+Beyond just finding anchors, the tool evaluates read length, quality scores, truncation, and valid base content to assign each read into a mutually exclusive **QC Bucket**:
+*   `pass`: The read meets all quality criteria, has valid anchor order, and is not severely truncated.
+*   `too_short` / `low_read_q`: Fails length or mean quality score thresholds.
+*   `invalid_order`: Anchors found, but in the wrong order.
+*   `no_anchor`: Fails to detect any anchors.
+*   `truncated_5p` / `truncated_3p`: Terminal anchors are found, but they are too far from the actual ends of the read, suggesting the sequence is truncated.
+*   `high_n` / `invalid_base`: The read contains too many `N` bases or non-standard characters.
 
-Open `out/report.html`.
+---
 
-Multi-sample via config (no `--fastq` or `--input` needed):
+## Configuration (`config.json`)
 
-```bash
-scfastq-qc run \
-  --config examples/multi_sample_config.json \
-  --outdir out
-```
-
-Where `multi_sample_config.json` contains a `"samples"` list (see [Config File](#config-file) below). When two or more samples are listed, `run` automatically processes them in batch mode and writes `out/batch_report.html`.
-
-## CLI Reference
-
-### Global options
-
-- `--log-file <path>`: optional log file
-- `--log-level <DEBUG|INFO|WARNING|ERROR|CRITICAL>`: default `INFO`
-
-### `run` (single sample or multi-sample via config)
-
-```bash
-# Classic: explicit fastq path
-scfastq-qc run \
-  --fastq <reads.fastq|reads.fastq.gz> \
-  --config <config.json> \
-  --outdir <outdir> \
-  [--export-csv]
-
-# Multi-sample: paths and names come from config "samples" list
-scfastq-qc run \
-  --config <config.json> \
-  --outdir <outdir> \
-  [--export-csv]
-```
-
-`--fastq` is required only when the config does **not** contain a `"samples"` list. When `"samples"` has a single entry, single-sample mode runs. When `"samples"` has two or more entries, batch mode runs automatically.
-
-### `batch` (multiple samples)
-
-```bash
-# Classic: scan a directory or file-list
-scfastq-qc batch \
-  --input <directory-or-filelist> \
-  --config <config.json> \
-  --outdir <outdir> \
-  [--pattern "*.fastq*"] \
-  [--parallel 4] \
-  [--continue-on-error] \
-  [--export-csv]
-
-# Config-driven: paths and names come from config "samples" list
-scfastq-qc batch \
-  --config <config.json> \
-  --outdir <outdir> \
-  [--parallel 4] \
-  [--continue-on-error] \
-  [--export-csv]
-```
-
-`--input` is required only when the config does **not** contain a `"samples"` list. When `--input` is supplied alongside a config that also contains `"samples"`, the `--input` source takes precedence and sample names fall back to file stems.
-
-`--input` supports:
-
-- directory mode: scan files using `--pattern` (default `*.fastq*`)
-- file-list mode: one FASTQ path per line
-
-Important file-list behavior:
-
-- relative paths in the list are resolved relative to the list file's directory (not shell current working directory)
-
-## Batch Output Behavior
-
-`batch_report.html` is generated by `batch` mode when batch summary is written.
-
-- if some samples fail, summary/report are still written
-- if all samples fail after entering batch processing, summary/report are still written (with failed stats)
-- if execution fails before batch processing starts (for example invalid CLI invocation), no batch report is created
-
-## Config File
-
-Two config formats are supported. Both formats can include the same `anchors`, `structure`, `thresholds`, and `qscore_method` fields.
-
-### Format 1 — classic single-sample config
-
-Use `sample_name` (string) at the top level and supply the fastq path via `--fastq`:
+`scfastq-qc` is heavily driven by a JSON configuration file. Here is a detailed breakdown of all parameters:
 
 ```json
 {
-  "sample_name": "example_sample",
+  "sample_name": "My_Experiment",
   "qscore_method": "conservative",
+  "export_non_full_structure_fastq": false,
+  
   "anchors": [
     {
       "name": "adapter_5p",
       "type": "fixed",
-      "sequence": "ACGTACGT",
-      "max_mismatches": 1
+      "sequence": "CGACATGGCTACGATCCGACTT",
+      "max_mismatches": 2
     },
     {
-      "name": "polyT",
+      "name": "polyA",
       "type": "regex",
-      "pattern": "T{6,}"
+      "pattern": "A{8,}"
     }
   ],
+  
   "structure": {
-    "expected_order": ["adapter_5p", "polyT"]
+    "expected_order": ["adapter_5p", "polyA"]
   },
+  
   "thresholds": {
-    "long_read_min_bp": 1000,
-    "long_read_min_q": 10.0
-  }
-}
-```
-
-### Format 2 — multi-sample (samplesheet-style) config
-
-Replace `sample_name` with a `"samples"` list where each entry binds a name to a fastq path. No `--fastq` or `--input` flag is needed on the command line:
-
-```json
-{
-  "samples": [
-    {"sample_name": "sample1", "path": "data/sample1.fastq.gz"},
-    {"sample_name": "sample2", "path": "data/sample2.fastq.gz"}
-  ],
-  "qscore_method": "conservative",
-  "anchors": [
-    {
-      "name": "adapter_5p",
-      "type": "fixed",
-      "sequence": "ACGTACGT",
-      "max_mismatches": 1
-    },
-    {
-      "name": "polyT",
-      "type": "regex",
-      "pattern": "T{6,}"
-    }
-  ],
-  "structure": {
-    "expected_order": ["adapter_5p", "polyT"]
-  },
-  "thresholds": {
-    "long_read_min_bp": 1000,
-    "long_read_min_q": 10.0
-  }
-}
-```
-
-When `"samples"` has one entry, `run` processes it as a single sample (output: `report.html`, `summary.json`). When it has two or more entries, `run` / `batch` automatically processes all of them in batch (output: per-sample subdirectories + `batch_report.html`, `batch_summary.json`).
-
-### Top-level fields
-
-- `sample_name`: label shown in report (Format 1 only; ignored if `"samples"` is present)
-- `samples`: list of `{"sample_name": "...", "path": "..."}` entries (Format 2)
-- `qscore_method`: `conservative` or `arithmetic_mean`
-- `anchors`: anchor definitions
-- `structure.expected_order`: expected left-to-right anchor order
-- `thresholds`: numeric cutoffs used in QC calculations and verdicting
-
-### Anchor fields
-
-- `name` (required): unique anchor name
-- `type` (required): `fixed` or `regex`
-- `sequence` (required for `fixed`)
-- `pattern` (required for `regex`)
-- `max_mismatches` (optional for `fixed`, default `0`)
-
-### Threshold fields and defaults
-
-Current defaults from code:
-
-- `long_read_min_bp`: `1000`
-- `long_read_min_q`: `10.0`
-- `terminal_anchor_max_offset`: `0.15`
-- `high_n_fraction`: `0.10`
-- `warn_long_high_quality_ratio`: `0.70`
-- `fail_long_high_quality_ratio`: `0.50`
-- `warn_correct_anchor_order_ratio`: `0.70`
-- `fail_correct_anchor_order_ratio`: `0.50`
-- `warn_no_anchor_ratio`: `0.20`
-- `fail_no_anchor_ratio`: `0.35`
-- `warn_reversed_read_ratio`: `0.30`
-- `fail_reversed_read_ratio`: `0.50`
-- `warn_high_n_ratio`: `0.10`
-- `fail_high_n_ratio`: `0.20`
-
-Legacy threshold keys such as `heatmap_max_reads`, `end_proximity_bp`, `end_proximity_fraction`, and `max_n_fraction` are no longer used by the current report pipeline. If they still appear in an old config file, they are ignored with a warning during config load.
-
-## QC Verdicts and How to Tune Them
-
-Yes, these thresholds are configurable in `config.json` under `thresholds`.
-
-`QC Verdicts` includes:
-
-- `Long high-quality ratio` (higher is better)
-- `Correct anchor order ratio` (higher is better)
-- `No-anchor ratio` (lower is better)
-- `Reversed read ratio` (lower is better)
-- `High-N read ratio` (lower is better)
-
-Verdict rule per metric:
-
-- higher-is-better metric:
-  - `< fail_threshold` -> `FAIL`
-  - `< warn_threshold` -> `WARN`
-  - otherwise -> `PASS`
-- lower-is-better metric:
-  - `> fail_threshold` -> `FAIL`
-  - `> warn_threshold` -> `WARN`
-  - otherwise -> `PASS`
-
-Overall assessment:
-
-- `FAIL` if any verdict is `FAIL`
-- else `WARN` if any verdict is `WARN`
-- else `PASS`
-
-### Practical threshold presets
-
-You can start from one of these presets and then fine-tune.
-
-Strict (high-confidence libraries, production gate):
-
-```json
-{
-  "thresholds": {
-    "warn_long_high_quality_ratio": 0.85,
-    "fail_long_high_quality_ratio": 0.70,
-    "warn_correct_anchor_order_ratio": 0.85,
-    "fail_correct_anchor_order_ratio": 0.70,
-    "warn_no_anchor_ratio": 0.10,
-    "fail_no_anchor_ratio": 0.20,
-    "warn_reversed_read_ratio": 0.20,
-    "fail_reversed_read_ratio": 0.35,
-    "warn_high_n_ratio": 0.05,
-    "fail_high_n_ratio": 0.10
-  }
-}
-```
-
-Standard (recommended starting point for most runs):
-
-```json
-{
-  "thresholds": {
-    "warn_long_high_quality_ratio": 0.70,
-    "fail_long_high_quality_ratio": 0.50,
-    "warn_correct_anchor_order_ratio": 0.70,
-    "fail_correct_anchor_order_ratio": 0.50,
-    "warn_no_anchor_ratio": 0.20,
+    "long_read_min_bp": 500,
+    "long_read_min_q": 10.0,
+    "terminal_anchor_max_offset": 0.15,
+    "high_n_fraction": 0.1,
+    
+    "warn_long_high_quality_ratio": 0.7,
+    "fail_long_high_quality_ratio": 0.5,
+    "warn_correct_anchor_order_ratio": 0.7,
+    "fail_correct_anchor_order_ratio": 0.5,
+    "warn_no_anchor_ratio": 0.2,
     "fail_no_anchor_ratio": 0.35,
-    "warn_reversed_read_ratio": 0.30,
-    "fail_reversed_read_ratio": 0.50,
-    "warn_high_n_ratio": 0.10,
-    "fail_high_n_ratio": 0.20
-  }
+    "warn_reversed_read_ratio": 0.3,
+    "fail_reversed_read_ratio": 0.5,
+    "warn_high_n_ratio": 0.1,
+    "fail_high_n_ratio": 0.2
+  },
+
+  "samples": [
+    { "sample_name": "Sample_A", "path": "data/sampleA.fastq.gz" },
+    { "sample_name": "Sample_B", "path": "data/sampleB.fastq.gz" }
+  ]
 }
 ```
 
-Lenient (pilot runs, noisy libraries, method development):
+### Parameter Details
 
-```json
-{
-  "thresholds": {
-    "warn_long_high_quality_ratio": 0.55,
-    "fail_long_high_quality_ratio": 0.35,
-    "warn_correct_anchor_order_ratio": 0.55,
-    "fail_correct_anchor_order_ratio": 0.35,
-    "warn_no_anchor_ratio": 0.30,
-    "fail_no_anchor_ratio": 0.45,
-    "warn_reversed_read_ratio": 0.40,
-    "fail_reversed_read_ratio": 0.60,
-    "warn_high_n_ratio": 0.20,
-    "fail_high_n_ratio": 0.30
-  }
-}
-```
+#### Global Settings
+*   `sample_name` (string): Default name for the sample (used in reports).
+*   `qscore_method` (string): Method for calculating mean read Q-score. `"conservative"` (default, converts to probabilities first) or `"arithmetic_mean"`.
+*   `export_non_full_structure_fastq` (bool): If true, creates a separate FASTQ file for *each* structure class (e.g., `missing_polyA.fastq`) containing the reads that fell into that class.
 
-### Recommended tuning order
+#### `anchors` (List of Objects)
+Defines the motifs to search for.
+*   `name` (string): Unique identifier for the anchor.
+*   `type` (string): `"fixed"` or `"regex"`.
+*   `sequence` (string): Required if type is `"fixed"`.
+*   `max_mismatches` (int): Required if type is `"fixed"`.
+*   `pattern` (string): Required if type is `"regex"`.
 
-1. Set data-defining cutoffs first: `long_read_min_bp`, `long_read_min_q`, `high_n_fraction`, `terminal_anchor_max_offset`.
-2. Then tune verdict thresholds (`warn_*` / `fail_*`) based on historical runs from your lab/protocol.
-3. Keep `warn` less strict than `fail` (for higher-is-better: `warn > fail`; for lower-is-better: `warn < fail`).
-4. Use batch mode to compare many samples before locking production thresholds.
+#### `structure`
+*   `expected_order` (List of strings): The order in which the defined anchors should appear from 5' to 3' on the read.
 
-### Protocol-specific guidance
+#### `thresholds`
+Controls the logic for QC Buckets and the final pass/warn/fail status of the entire run.
+*   `long_read_min_bp`: Minimum length for a read to be considered "long/valid".
+*   `long_read_min_q`: Minimum mean Q-score for a read to be considered "high quality".
+*   `terminal_anchor_max_offset`: Used to detect truncation. If the first/last expected anchors are found, but their distance from the end of the read exceeds this fraction (e.g., `0.15` = 15% of read length), the read is flagged as truncated.
+*   `high_n_fraction`: Maximum allowed fraction of 'N' bases in a read.
+*   `warn_*` / `fail_*`: Thresholds for the overall sample HTML report verdicts. For example, if the ratio of reads with no anchors exceeds `fail_no_anchor_ratio`, the report will flag the library construction as "Failed".
 
-- If many reads are marked `too_short` or `low_read_q`, adjust `long_read_min_bp` / `long_read_min_q` first, not only verdict thresholds.
-- If `no_anchor` is high, validate anchor definitions (`sequence`, `pattern`, `max_mismatches`) before relaxing `warn_no_anchor_ratio`.
-- If truncation is common, review `terminal_anchor_max_offset` and library prep context before changing `warn_correct_anchor_order_ratio`.
+#### `samples` (Optional)
+A list of sample dictionaries (`sample_name`, `path`). If provided, you can run batch jobs entirely driven by the config file without specifying paths on the command line.
 
-## Quality Definition
+---
 
-FASTQ qualities are interpreted as Phred+33.
+## Usage & CLI Reference
 
-For `qscore_method = "conservative"` (default), per-read Qscore is computed via mean error probability:
+The CLI has two main subcommands: `run` (for single files or config-driven batches) and `batch` (for directory/file-list inputs).
 
-1. convert base Q to error probability `10^(-Q/10)`
-2. average across bases
-3. convert back: `-10 * log10(mean_error_rate)`
+### Global Options
+*   `--log-file <path>`: Write logs to a file.
+*   `--log-level <DEBUG|INFO|WARNING|ERROR|CRITICAL>`: Default is `INFO`.
 
-For `qscore_method = "arithmetic_mean"`, it uses simple arithmetic mean of per-base Phred values.
-
-## Rust Accelerator (Optional)
-
-The fixed-anchor scanner can use an optional Rust shared library.
-
-- if Rust is unavailable, tool automatically falls back to Python
-- fallback is recorded in `summary.json` and report run-configuration panel
-
-To manually build:
+### Subcommand: `run`
+Used for processing a single FASTQ file, or triggering a batch if the `--config` file contains a `"samples"` list.
 
 ```bash
-cargo build --release --manifest-path rust/anchor_engine/Cargo.toml
+scfastq-qc run \
+  --fastq input.fastq.gz \
+  --config config.json \
+  --outdir ./results \
+  --threads 8 \
+  --output-passed-fastq \
+  --output-failed-fastq \
+  --export-csv
 ```
 
-To use a prebuilt shared library directly:
+**Parameters for `run`:**
+*   `--fastq`: Path to input FASTQ/FASTQ.GZ. *Required unless your config file has a `samples` list.*
+*   `--config`: Path to `config.json`.
+*   `--outdir`: Where to save the output files.
+*   `--threads N`: Number of CPU processes to use for parallelizing the anchor search within the single FASTQ file. Dramatically speeds up processing (Default: 1).
+*   `--output-passed-fastq`: Export reads that landed in the `pass` QC Bucket to `passed.fastq`.
+*   `--output-failed-fastq`: Export reads that landed in any non-pass QC Bucket to `failed.fastq`.
+*   `--export-csv`: Export detailed per-read and per-anchor statistics to CSV files.
+
+### Subcommand: `batch`
+Used for processing multiple FASTQ files by scanning a directory or reading a list of files.
 
 ```bash
-export SCFASTQ_QC_RUST_LIB=/absolute/path/to/libanchor_engine.so
+# Scan a directory for FASTQ files
+scfastq-qc batch \
+  --input /path/to/data_dir \
+  --pattern "*.fastq.gz" \
+  --config config.json \
+  --outdir ./batch_results \
+  --parallel 4 \
+  --output-passed-fastq
 ```
 
-## Notes and Limits
+**Parameters for `batch`:**
+*   `--input`: Path to a directory containing FASTQ files, or a text file containing one FASTQ path per line. *Required unless config has a `samples` list.*
+*   `--pattern`: If `--input` is a directory, glob pattern to match files (Default: `*.fastq*`).
+*   `--config`: Path to `config.json`.
+*   `--outdir`: Base output directory. A subdirectory will be created for each sample.
+*   `--parallel N`: Number of *samples* to process concurrently (Sample-level parallelism).
+*   `--continue-on-error`: If one sample fails, log the error and continue with the rest.
+*   `--output-passed-fastq` / `--output-failed-fastq`: Export filtered FASTQs inside each sample's subdirectory.
+*   `--export-csv`: Export CSVs inside each sample's subdirectory.
 
-- This tool is for **FASTQ basic QC** only.
-- It does not replace downstream transcriptomic analysis pipelines.
+> **Parallelism Note:**
+> *   Use `batch --parallel N` to process *N different samples* at the same time.
+> *   Use `run --threads N` to process *1 sample* using N CPU cores.
+
+---
+
+## Output Files
+
+Depending on the mode and flags used, `scfastq-qc` generates the following inside the `--outdir`:
+
+### Standard Outputs (Always Generated)
+*   **`report.html`**: A highly visual, interactive HTML report containing length distributions, Q-score plots, anchor detection heatmaps, and overall sample verdicts. It is completely self-contained (no internet required to view).
+*   **`summary.json`**: A machine-readable JSON file containing all the raw metrics and calculated ratios presented in the HTML report.
+
+### Filtered FASTQs (When requested)
+*   **`passed.fastq`**: Generated if `--output-passed-fastq` is provided. Contains reads deemed "good" by the QC bucket logic.
+*   **`failed.fastq`**: Generated if `--output-failed-fastq` is provided. Contains the reads that failed QC.
+*   **`<structure_label>.fastq`**: Generated if `export_non_full_structure_fastq` is `true` in the config. Groups reads strictly by missing anchors or unexpected order.
+
+### CSV Exports (When `--export-csv` is requested)
+*   **`summary.csv`**: Flattened version of the high-level metrics.
+*   **`structure_classification.csv`**: Counts and ratios of reads falling into each structure category.
+*   **`read_details.csv`**: A large file containing 1 row per read, detailing its length, q-score, offsets, structure, and QC bucket.
+*   **`anchor_hits.csv`**: A large file containing 1 row per detected anchor hit per read, detailing coordinates and mismatches.
+
+### Batch Outputs (Only in `batch` mode)
+In addition to a subdirectory for each sample containing the files above, batch mode generates at the root of `--outdir`:
+*   **`batch_report.html`**: A high-level summary table comparing key metrics (Total reads, High-quality %, Valid order %, Overall status) across all processed samples.
+*   **`batch_summary.json`**: JSON representation of the batch results.

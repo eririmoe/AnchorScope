@@ -1,0 +1,136 @@
+{
+  "sample_name": "real_10k_1",
+  "fastq_path": "examples2\\10K_test.fastq",
+  "config_summary": {
+    "anchors": [
+      "adapter_5p",
+      "polyA"
+    ],
+    "expected_order": [
+      "adapter_5p",
+      "polyA"
+    ],
+    "export_non_full_structure_fastq": false,
+    "long_read_min_bp": 200,
+    "long_read_min_q": 13,
+    "terminal_anchor_max_offset": 0.15,
+    "high_n_fraction": 0.1
+  },
+  "total_reads": 10000,
+  "total_bases": 8650110,
+  "mean_read_length": 865.011,
+  "median_read_length": 745.0,
+  "n50": 926,
+  "min_read_length": 201,
+  "max_read_length": 3820,
+  "median_read_qscore": 15.58,
+  "long_high_quality_ratio": 0.8606,
+  "reversed_read_ratio": 0.0285,
+  "five_prime_truncation_ratio": 0.0,
+  "three_prime_truncation_ratio": 0.1245,
+  "high_n_read_ratio": 0.0,
+  "invalid_base_read_ratio": 0.0,
+  "anchor_detection_ratio": {
+    "adapter_5p": 0.7324,
+    "polyA": 0.9553
+  },
+  "anchor_quality_stats": {
+    "adapter_5p": {
+      "detection_ratio": 0.7324,
+      "mean_best_mismatches": 0.1245221190606226,
+      "multi_hit_ratio": 0.0,
+      "mean_hits_per_positive_read": 1.0
+    },
+    "polyA": {
+      "detection_ratio": 0.9553,
+      "mean_best_mismatches": 0.0,
+      "multi_hit_ratio": 0.19020203077567258,
+      "mean_hits_per_positive_read": 1.229666073484769
+    }
+  },
+  "structure_counts": {
+    "full_structure": 5626,
+    "missing_5p_anchor": 2110,
+    "no_anchor_detected": 93,
+    "internal_3p_anchor": 1817,
+    "missing_3p_anchor": 354
+  },
+  "structure_orientation_counts": {
+    "full_structure": {
+      "forward": 5625,
+      "reversed": 1
+    },
+    "missing_5p_anchor": {
+      "forward": 1836,
+      "reversed": 274
+    },
+    "no_anchor_detected": {
+      "forward": 93
+    },
+    "internal_3p_anchor": {
+      "forward": 1810,
+      "reversed": 7
+    },
+    "missing_3p_anchor": {
+      "forward": 351,
+      "reversed": 3
+    }
+  },
+  "correct_anchor_order_ratio": 0.5626,
+  "qc_bucket_counts": {
+    "pass": 5095,
+    "internal_adapter": 1620,
+    "missing_5p": 1542,
+    "low_read_q": 1394,
+    "missing_3p": 282,
+    "no_anchor": 54,
+    "three_prime_truncated": 13
+  },
+  "qc_bucket_ratios": {
+    "pass": 0.5095,
+    "internal_adapter": 0.162,
+    "missing_5p": 0.1542,
+    "low_read_q": 0.1394,
+    "missing_3p": 0.0282,
+    "no_anchor": 0.0054,
+    "three_prime_truncated": 0.0013
+  },
+  "rust_accelerator": {
+    "mode": "python-fallback",
+    "detail": "cargo not found; using Python implementation"
+  },
+  "passed_reads_exported": 5095,
+  "failed_reads_exported": 4905,
+  "qc_verdicts": {
+    "long_high_quality_ratio": {
+      "label": "Long high-quality ratio",
+      "value": 0.8606,
+      "status": "pass"
+    },
+    "correct_anchor_order_ratio": {
+      "label": "Correct anchor order ratio",
+      "value": 0.5626,
+      "status": "warn"
+    },
+    "no_anchor_ratio": {
+      "label": "No-anchor ratio",
+      "value": 0.0054,
+      "status": "pass"
+    },
+    "reversed_read_ratio": {
+      "label": "Reversed read ratio",
+      "value": 0.0285,
+      "status": "pass"
+    },
+    "high_n_read_ratio": {
+      "label": "High-N read ratio",
+      "value": 0.0,
+      "status": "pass"
+    },
+    "overall": {
+      "label": "Overall QC",
+      "value": null,
+      "status": "warn"
+    }
+  }
+}

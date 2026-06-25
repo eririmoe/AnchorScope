@@ -1,0 +1,16 @@
+Structure Class,Orientation,Count,Percentage
+missing_5p_anchor,forward,1062,10.62%
+missing_5p_anchor,reversed,987,9.87%
+full_structure,forward,2725,27.25%
+full_structure,reversed,2753,27.53%
+no_anchor_detected,forward,105,1.05%
+internal_3p_anchor,forward,945,9.45%
+internal_3p_anchor,reversed,983,9.83%
+missing_3p_anchor,forward,196,1.96%
+missing_3p_anchor,reversed,96,0.96%
+concatemer_candidate,forward,34,0.34%
+concatemer_candidate,reversed,74,0.74%
+internal_5p_anchor,forward,15,0.15%
+internal_5p_anchor,reversed,21,0.21%
+anchor_order_invalid,forward,1,0.01%
+anchor_order_invalid,reversed,3,0.03%

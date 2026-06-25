@@ -30,7 +30,7 @@ def _write_batch_html_report(summary: dict[str, Any], outdir: Path) -> None:
 <head>
   <meta charset='utf-8'>
   <meta name='viewport' content='width=device-width, initial-scale=1'>
-  <title>scfastq-qc batch summary</title>
+  <title>AnchorScope batch summary</title>
   <style>
     body {{ font-family:'IBM Plex Sans','Segoe UI',sans-serif; margin:0; background:#f7f5ef; color:#12232f; }}
     .page {{ max-width:1100px; margin:0 auto; padding:28px 18px 40px; }}
@@ -52,7 +52,7 @@ def _write_batch_html_report(summary: dict[str, Any], outdir: Path) -> None:
   <div class='page'>
     <div class='hero'>
       <h1>Batch QC Summary</h1>
-      <p>Cross-sample comparison for the basic QC metrics produced by scfastq-qc.</p>
+      <p>Cross-sample comparison for the basic QC metrics produced by AnchorScope.</p>
       <div class='cards'>
         <div class='card'><div class='label'>Samples</div><div class='value'>{summary['total_count']}</div></div>
         <div class='card'><div class='label'>Successful</div><div class='value'>{summary['success_count']}</div></div>

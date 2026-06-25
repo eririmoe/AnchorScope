@@ -42,19 +42,27 @@ _RC_TRANSLATION = str.maketrans("ACGTNacgtn", "TGCANtgcan")
 class RustAnchorEngine:
     def __init__(self, library_path: Path):
         self._lib = ctypes.CDLL(str(library_path))
-        self._lib.scfastq_find_fixed_hits.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_size_t]
-        self._lib.scfastq_find_fixed_hits.restype = ctypes.c_void_p
-        self._lib.scfastq_free_string.argtypes = [ctypes.c_void_p]
-        self._lib.scfastq_free_string.restype = None
+        self._find_fixed_hits = self._load_symbol("anchorscope_find_fixed_hits", "scfastq_find_fixed_hits")
+        self._free_string = self._load_symbol("anchorscope_free_string", "scfastq_free_string")
+        self._find_fixed_hits.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_size_t]
+        self._find_fixed_hits.restype = ctypes.c_void_p
+        self._free_string.argtypes = [ctypes.c_void_p]
+        self._free_string.restype = None
+
+    def _load_symbol(self, preferred_name: str, fallback_name: str):
+        try:
+            return getattr(self._lib, preferred_name)
+        except AttributeError:
+            return getattr(self._lib, fallback_name)
 
     def find_fixed_hits(self, sequence: str, motif: str, max_mismatches: int) -> list[tuple[int, int]]:
-        raw_ptr = self._lib.scfastq_find_fixed_hits(sequence.encode("utf-8"), motif.encode("utf-8"), max_mismatches)
+        raw_ptr = self._find_fixed_hits(sequence.encode("utf-8"), motif.encode("utf-8"), max_mismatches)
         if not raw_ptr:
             return []
         try:
             payload = ctypes.string_at(raw_ptr).decode("utf-8")
         finally:
-            self._lib.scfastq_free_string(raw_ptr)
+            self._free_string(raw_ptr)
         if not payload:
             return []
         hits: list[tuple[int, int]] = []
@@ -66,16 +74,25 @@ class RustAnchorEngine:
 
 def _rust_library_candidates(repo_root: Path) -> list[Path]:
     package_root = Path(__file__).resolve().parent
-    env_path = os.environ.get("SCFASTQ_QC_RUST_LIB")
+    env_path = os.environ.get("ANCHORSCOPE_RUST_LIB") or os.environ.get("SCFASTQ_QC_RUST_LIB")
     env_candidate = [Path(env_path)] if env_path else []
     return [
         *env_candidate,
+        package_root / "_native" / "anchorscope_rs.dll",
+        package_root / "_native" / "libanchorscope_rs.so",
+        package_root / "_native" / "libanchorscope_rs.dylib",
         package_root / "_native" / "scfastq_qc_rs.dll",
         package_root / "_native" / "libscfastq_qc_rs.so",
         package_root / "_native" / "libscfastq_qc_rs.dylib",
+        repo_root / "target" / "release" / "libanchorscope_rs.so",
+        repo_root / "target" / "release" / "anchorscope_rs.dll",
+        repo_root / "target" / "release" / "libanchorscope_rs.dylib",
         repo_root / "target" / "release" / "libscfastq_qc_rs.so",
         repo_root / "target" / "release" / "scfastq_qc_rs.dll",
         repo_root / "target" / "release" / "libscfastq_qc_rs.dylib",
+        repo_root / "rust" / "anchor_engine" / "target" / "release" / "libanchorscope_rs.so",
+        repo_root / "rust" / "anchor_engine" / "target" / "release" / "anchorscope_rs.dll",
+        repo_root / "rust" / "anchor_engine" / "target" / "release" / "libanchorscope_rs.dylib",
         repo_root / "rust" / "anchor_engine" / "target" / "release" / "libscfastq_qc_rs.so",
         repo_root / "rust" / "anchor_engine" / "target" / "release" / "scfastq_qc_rs.dll",
         repo_root / "rust" / "anchor_engine" / "target" / "release" / "libscfastq_qc_rs.dylib",

@@ -1,8 +1,8 @@
-# scfastq-qc
+# AnchorScope
 
-`scfastq-qc` is a high-performance, structure-aware Quality Control (QC) and filtering tool designed specifically for single-cell long-read sequencing libraries. 
+`AnchorScope` is a high-performance, anchor-aware Quality Control (QC) and filtering tool designed specifically for single-cell long-read sequencing libraries.
 
-Unlike traditional bulk FASTQ QC tools, `scfastq-qc` understands the molecular structure of single-cell libraries. It actively searches for expected sequences (like adapters, polyA tails, cell barcodes) to classify each read, providing deep insights into library construction success, structural integrity, and overall sequencing quality.
+Unlike traditional bulk FASTQ QC tools, `AnchorScope` understands the molecular structure of single-cell libraries. It actively searches for expected sequences (like adapters, polyA tails, cell barcodes) to classify each read, providing deep insights into library construction success, structural integrity, and overall sequencing quality.
 
 ## Key Features
 
@@ -30,9 +30,9 @@ cd rust/anchor_engine
 cargo build --release
 ```
 Then, set the environment variable to point to the compiled library before running the tool:
-*   **Linux**: `export SCFASTQ_QC_RUST_LIB=$(pwd)/target/release/libanchor_engine.so`
-*   **macOS**: `export SCFASTQ_QC_RUST_LIB=$(pwd)/target/release/libanchor_engine.dylib`
-*   **Windows**: `$env:SCFASTQ_QC_RUST_LIB = "$PWD\target\release\anchor_engine.dll"`
+*   **Linux**: `export ANCHORSCOPE_RUST_LIB=$(pwd)/target/release/libanchorscope_rs.so`
+*   **macOS**: `export ANCHORSCOPE_RUST_LIB=$(pwd)/target/release/libanchorscope_rs.dylib`
+*   **Windows**: `$env:ANCHORSCOPE_RUST_LIB = "$PWD\target\release\anchorscope_rs.dll"`
 
 ### 2. Install the Python Package
 ```bash
@@ -43,7 +43,7 @@ pip install -e .
 
 ## Core Concepts
 
-Understanding how `scfastq-qc` processes reads is key to configuring it correctly.
+Understanding how `AnchorScope` processes reads is key to configuring it correctly.
 
 ### 1. Anchors
 An **Anchor** is a known sequence motif expected to be present in your library (e.g., a 5' adapter, a 3' adapter, or a polyA tail).
@@ -52,12 +52,12 @@ An **Anchor** is a known sequence motif expected to be present in your library (
 
 **Anchor Matching Principles:**
 1.  **Fuzzy Searching**: For fixed anchors, the tool performs a sliding-window fuzzy search. If `max_mismatches` > 0, it allows up to that many substitutions, insertions, or deletions to still consider it a match. This is crucial for long-read data (like Oxford Nanopore) which inherently has a higher base error rate.
-2.  **Rust Acceleration**: To handle the computationally expensive fuzzy matching across millions of long reads, `scfastq-qc` utilizes a highly optimized Rust core (when compiled), resulting in massive speedups over pure Python implementations.
+2.  **Rust Acceleration**: To handle the computationally expensive fuzzy matching across millions of long reads, `AnchorScope` utilizes a highly optimized Rust core (when compiled), resulting in massive speedups over pure Python implementations.
 3.  **Best Hit Selection**: If a specific anchor motif appears multiple times in a single read, the tool intelligently selects the "best hit"—prioritizing the match with the fewest mismatches.
 4.  **Strand Agnostic**: Because single-cell long-read libraries often sequence both the forward and reverse-complement strands randomly, the anchor matching runs twice for every read: once on the raw sequence, and once on its reverse-complement. The strand that yields the most complete and correctly ordered set of anchors is determined to be the true biological orientation.
 
 ### 2. Structure Classification
-`scfastq-qc` scans every read (and its reverse complement) for all defined anchors. Based on what it finds, it assigns a **Structure Label**:
+`AnchorScope` scans every read (and its reverse complement) for all defined anchors. Based on what it finds, it assigns a **Structure Label**:
 *   `full_structure`: All expected anchors were found.
 *   `missing_<anchor_name>`: Specific anchors were not found.
 *   `unexpected_order`: Anchors were found, but not in the order you defined.
@@ -76,7 +76,7 @@ Beyond just finding anchors, the tool evaluates read length, quality scores, tru
 
 ## Configuration (`config.json`)
 
-`scfastq-qc` is heavily driven by a JSON configuration file. Here is a detailed breakdown of all parameters:
+`AnchorScope` is heavily driven by a JSON configuration file. Here is a detailed breakdown of all parameters:
 
 ```json
 {
@@ -170,7 +170,7 @@ The CLI has two main subcommands: `run` (for single files or config-driven batch
 Used for processing a single FASTQ file, or triggering a batch if the `--config` file contains a `"samples"` list.
 
 ```bash
-scfastq-qc run \
+anchorscope run \
   --fastq input.fastq.gz \
   --config config.json \
   --outdir ./results \
@@ -194,7 +194,7 @@ Used for processing multiple FASTQ files by scanning a directory or reading a li
 
 ```bash
 # Scan a directory for FASTQ files
-scfastq-qc batch \
+anchorscope batch \
   --input /path/to/data_dir \
   --pattern "*.fastq.gz" \
   --config config.json \
@@ -221,7 +221,7 @@ scfastq-qc batch \
 
 ## Output Files
 
-Depending on the mode and flags used, `scfastq-qc` generates the following inside the `--outdir`:
+Depending on the mode and flags used, `AnchorScope` generates the following inside the `--outdir`:
 
 ### Standard Outputs (Always Generated)
 *   **`report.html`**: A highly visual, interactive HTML report containing length distributions, Q-score plots, anchor detection heatmaps, and overall sample verdicts. It is completely self-contained (no internet required to view).

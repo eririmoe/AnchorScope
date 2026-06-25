@@ -3,9 +3,9 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "scfastq-qc"
+name = "AnchorScope"
 version = "0.1.0"
-description = "Structure-aware FASTQ QC for single-cell long-read libraries"
+description = "Anchor-aware FASTQ QC for single-cell long-read libraries"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.scripts]
-scfastq-qc = "scfastq_qc.cli:main"
+anchorscope = "anchorscope.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

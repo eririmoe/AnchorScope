@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Structure-aware FASTQ QC for single-cell long-read libraries"
+        description="AnchorScope: anchor-aware FASTQ QC for single-cell long-read libraries"
     )
 
     parser.add_argument("--log-file", help="Log file path (optional)")

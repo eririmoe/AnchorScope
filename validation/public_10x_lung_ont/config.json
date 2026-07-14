@@ -1,0 +1,73 @@
+{
+  "$schema": "../../src/anchorscope/config.schema.json",
+  "sample_name": "SC5pv2_GEX_Human_Lung_Carcinoma_DTC_public_10k",
+  "qscore_method": "conservative",
+  "anchors": [
+    {
+      "name": "read1_adapter",
+      "type": "fixed",
+      "sequence": "CTACACGACGCTCTTCCGATCT",
+      "max_edits": 3,
+      "search_region": "5p",
+      "search_window_bp": 250
+    },
+    {
+      "name": "tso_adapter",
+      "type": "fixed",
+      "sequence": "GTACTCTGCGTTGATACCACTGCTT",
+      "max_edits": 3,
+      "search_region": "3p",
+      "search_window_bp": 250
+    }
+  ],
+  "structure": {
+    "expected_order": ["read1_adapter", "tso_adapter"],
+    "expected_orientation": "either",
+    "concatemer_min_cycles": 2,
+    "split_concatemers": true,
+    "anchor_rules": {
+      "read1_adapter": {
+        "required": true,
+        "min_count": 1,
+        "max_count": 1,
+        "terminal": "5p",
+        "max_terminal_offset": 0.25
+      },
+      "tso_adapter": {
+        "required": true,
+        "min_count": 1,
+        "max_count": 1,
+        "terminal": "3p",
+        "max_terminal_offset": 0.25
+      }
+    },
+    "segments": [
+      {
+        "name": "transcript_insert",
+        "start_anchor": "read1_adapter",
+        "end_anchor": "tso_adapter",
+        "role": "insert",
+        "min_length": 100,
+        "max_length": 10000
+      }
+    ]
+  },
+  "barcode": {
+    "enabled": true,
+    "left_anchor": "read1_adapter",
+    "right_anchor": "tso_adapter",
+    "barcode_length": 16,
+    "umi_length": 10,
+    "offset_from_left": 0,
+    "min_base_quality": 10,
+    "whitelist_path": null,
+    "max_edit_distance": 1,
+    "min_distance_margin": 1
+  },
+  "thresholds": {
+    "long_read_min_bp": 200,
+    "long_read_min_q": 10,
+    "terminal_anchor_max_offset": 0.25,
+    "high_n_fraction": 0.1
+  }
+}

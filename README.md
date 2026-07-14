@@ -356,5 +356,3 @@ python -B benchmarks/validate_comprehensive_synthetic.py \
 ```
 
 Formal metric definitions, algorithm details, limitations, benchmarking guidance, and validation design are documented in `docs/METHODS.md`, `docs/BENCHMARKING.md`, and `docs/SYNTHETIC_VALIDATION.md`. Configuration keys are machine-described by `src/anchorscope/config.schema.json`.
-
-AnchorScope is released under the MIT License. Citation metadata are provided in `CITATION.cff`.

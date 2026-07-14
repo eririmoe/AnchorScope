@@ -75,6 +75,18 @@ def open_text(path: str | Path):
     return path.open("r", encoding="utf-8")
 
 
+def open_output_text(path: str | Path):
+    path = Path(path)
+    if path.suffix == ".gz":
+        return gzip.open(path, "wt", encoding="utf-8")
+    return path.open("w", encoding="utf-8")
+
+
+def fastq_output_path(outdir: str | Path, stem: str, gzip_output: bool) -> Path:
+    suffix = ".fastq.gz" if gzip_output else ".fastq"
+    return Path(outdir) / f"{stem}{suffix}"
+
+
 def read_fastq(path: str | Path, qscore_method: str = "conservative") -> Iterator[FastqRead]:
     with open_text(path) as handle:
         record_index = 0

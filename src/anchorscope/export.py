@@ -24,12 +24,52 @@ def export_summary_to_csv(summary: dict[str, Any], output_path: Path) -> None:
         writer.writerow(["5' Truncation Ratio", f"{summary.get('five_prime_truncation_ratio', 0):.4f}"])
         writer.writerow(["3' Truncation Ratio", f"{summary.get('three_prime_truncation_ratio', 0):.4f}"])
         writer.writerow(["High-N Read Ratio", f"{summary.get('high_n_read_ratio', 0):.4f}"])
-        writer.writerow(["Rust Accelerator", summary.get("rust_accelerator", {}).get("mode", "python-fallback")])
+        writer.writerow(["Matcher Backend", summary.get("matcher_backend", summary.get("rust_accelerator", {})).get("mode", "unknown")])
 
         writer.writerow([])
         writer.writerow(["Anchor Detection Ratios"])
         for anchor_name, ratio in summary.get("anchor_detection_ratio", {}).items():
             writer.writerow([anchor_name, f"{ratio:.4f}"])
+
+        writer.writerow([])
+        writer.writerow(["Anchor Edit Statistics"])
+        writer.writerow(["Anchor", "Mean Edits", "Mean Substitutions", "Mean Insertions", "Mean Deletions"])
+        for anchor_name, values in summary.get("anchor_quality_stats", {}).items():
+            writer.writerow([
+                anchor_name,
+                f"{values.get('mean_best_mismatches', 0):.4f}",
+                f"{values.get('mean_best_substitutions', 0):.4f}",
+                f"{values.get('mean_best_insertions', 0):.4f}",
+                f"{values.get('mean_best_deletions', 0):.4f}",
+            ])
+
+        if summary.get("segment_qc"):
+            writer.writerow([])
+            writer.writerow(["Segment QC"])
+            writer.writerow(["Segment", "Observed Ratio", "Median Length", "Median Qscore", "Mean GC", "Within Bounds"])
+            for name, values in summary["segment_qc"].items():
+                writer.writerow([
+                    name,
+                    f"{values['observed_ratio']:.4f}",
+                    f"{values['median_length']:.2f}",
+                    f"{values['median_qscore']:.2f}",
+                    f"{values['mean_gc_fraction']:.4f}",
+                    f"{values['within_length_ratio']:.4f}",
+                ])
+
+        if summary.get("barcode_qc"):
+            writer.writerow([])
+            writer.writerow(["Barcode/UMI Recoverability"])
+            for key in (
+                "observed_ratio",
+                "recoverable_ratio",
+                "ambiguous_ratio",
+                "low_quality_ratio",
+                "unique_raw_barcodes",
+                "unique_raw_umis",
+                "umi_singleton_ratio",
+            ):
+                writer.writerow([key, summary["barcode_qc"].get(key, "")])
 
         writer.writerow([])
         writer.writerow(["QC Bucket Counts"])
@@ -46,6 +86,8 @@ def export_summary_to_csv(summary: dict[str, Any], output_path: Path) -> None:
         for structure, orientations in summary.get("structure_orientation_counts", {}).items():
             for orientation, count in orientations.items():
                 writer.writerow([f"{structure} ({orientation})", count])
+
+
 def export_structure_classification_to_csv(summary: dict[str, Any], output_path: Path) -> None:
     with open(output_path, "w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)

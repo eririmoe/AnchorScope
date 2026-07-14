@@ -56,6 +56,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=1,
         help="Number of threads for single-sample processing (default: 1)",
     )
+    run_parser.add_argument(
+        "--gzip-output",
+        action="store_true",
+        help="Compress exported FASTQ files as .fastq.gz",
+    )
 
     batch_parser = subparsers.add_parser("batch", help="Run QC on multiple FASTQ files")
     batch_parser.add_argument(
@@ -96,6 +101,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Export reads with QC bucket != 'pass' to failed.fastq",
     )
+    batch_parser.add_argument(
+        "--gzip-output",
+        action="store_true",
+        help="Compress exported FASTQ files as .fastq.gz",
+    )
+
+    audit_parser = subparsers.add_parser(
+        "audit-bam", help="Audit external cell-barcode, UMI, and poly(A) BAM/SAM tags"
+    )
+    audit_parser.add_argument("--bam", required=True, help="Input BAM, unaligned BAM, or SAM")
+    audit_parser.add_argument("--outdir", required=True, help="Output directory")
+    audit_parser.add_argument("--sample-name", default=None, help="Optional sample name")
 
     return parser
 
@@ -129,6 +146,15 @@ def main() -> None:
     log_file = Path(args.log_file) if args.log_file else None
     setup_logging(log_file=log_file, level=args.log_level)
 
+    if args.command == "audit-bam":
+        from .interop import audit_bam
+
+        try:
+            audit_bam(args.bam, args.outdir, sample_name=args.sample_name)
+        except RuntimeError as exc:
+            parser.error(str(exc))
+        return
+
     if args.command == "run":
         config = load_config(args.config)
         if config.samples:
@@ -142,6 +168,7 @@ def main() -> None:
                     output_passed_fastq=args.output_passed_fastq,
                     output_failed_fastq=args.output_failed_fastq,
                     threads=args.threads,
+                    gzip_output=args.gzip_output,
                 )
             else:
                 fastq_files = [Path(e.path) for e in config.samples]
@@ -157,6 +184,7 @@ def main() -> None:
                         output_passed_fastq=args.output_passed_fastq,
                         output_failed_fastq=args.output_failed_fastq,
                         sample_names=sample_names,
+                        gzip_output=args.gzip_output,
                     )
                 except BatchProcessingError as exc:
                     logger.error("%s", exc)
@@ -170,6 +198,7 @@ def main() -> None:
                 output_passed_fastq=args.output_passed_fastq,
                 output_failed_fastq=args.output_failed_fastq,
                 threads=args.threads,
+                gzip_output=args.gzip_output,
             )
         return
 
@@ -197,6 +226,7 @@ def main() -> None:
             output_passed_fastq=args.output_passed_fastq,
             output_failed_fastq=args.output_failed_fastq,
             sample_names=batch_sample_names if batch_sample_names else None,
+            gzip_output=args.gzip_output,
         )
     except BatchProcessingError as exc:
         logger.error("%s", exc)

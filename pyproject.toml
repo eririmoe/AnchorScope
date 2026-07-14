@@ -3,20 +3,37 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "scfastq-qc"
-version = "0.1.0"
-description = "Structure-aware FASTQ QC for single-cell long-read libraries"
+name = "AnchorScope"
+version = "0.2.0"
+description = "Anchor-aware FASTQ QC for single-cell long-read libraries"
 readme = "README.md"
 requires-python = ">=3.10"
+license = {file = "LICENSE"}
+authors = [{name = "AnchorScope contributors"}]
+keywords = ["long-read", "single-cell", "quality-control", "nanopore", "iso-seq"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
 dependencies = [
     "tqdm>=4.60.0",
 ]
 
+[project.optional-dependencies]
+bam = ["pysam>=0.22.0"]
+test = []
+
 [project.scripts]
-scfastq-qc = "scfastq_qc.cli:main"
+anchorscope = "anchorscope.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+anchorscope = ["config.schema.json"]

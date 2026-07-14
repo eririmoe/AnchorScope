@@ -76,7 +76,7 @@ fn find_approximate_hits(sequence: &str, motif: &str, max_mismatches: usize) -> 
 }
 
 #[no_mangle]
-pub extern "C" fn scfastq_find_fixed_hits(
+pub extern "C" fn anchorscope_find_fixed_hits(
     sequence: *const c_char,
     motif: *const c_char,
     max_mismatches: usize,
@@ -101,7 +101,7 @@ pub extern "C" fn scfastq_find_fixed_hits(
 }
 
 #[no_mangle]
-pub extern "C" fn scfastq_free_string(ptr: *mut c_char) {
+pub extern "C" fn anchorscope_free_string(ptr: *mut c_char) {
     if ptr.is_null() {
         return;
     }

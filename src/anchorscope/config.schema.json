@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://anchorscope.local/schema/config.schema.json",
+  "title": "AnchorScope configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {"type": "string"},
+    "sample_name": {"type": "string", "minLength": 1},
+    "qscore_method": {"enum": ["conservative", "arithmetic_mean"]},
+    "export_non_full_structure_fastq": {"type": "boolean"},
+    "anchors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "type"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "type": {"enum": ["fixed", "regex"]},
+          "sequence": {"type": ["string", "null"]},
+          "pattern": {"type": ["string", "null"]},
+          "max_mismatches": {"type": "integer", "minimum": 0},
+          "max_edits": {"type": ["integer", "null"], "minimum": 0},
+          "search_region": {"enum": ["any", "5p", "3p"]},
+          "search_window_bp": {"type": ["integer", "null"], "minimum": 1}
+        }
+      }
+    },
+    "structure": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "expected_order": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "expected_orientation": {"enum": ["either", "forward", "reverse"]},
+        "concatemer_min_cycles": {"type": "integer", "minimum": 2},
+        "split_concatemers": {"type": "boolean"},
+        "anchor_rules": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "required": {"type": "boolean"},
+              "min_count": {"type": "integer", "minimum": 0},
+              "max_count": {"type": ["integer", "null"], "minimum": 0},
+              "terminal": {"enum": ["any", "5p", "3p", "internal"]},
+              "max_terminal_offset": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+              "min_distance_from_previous": {"type": ["integer", "null"]},
+              "max_distance_from_previous": {"type": ["integer", "null"]}
+            }
+          }
+        },
+        "segments": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "start_anchor", "end_anchor"],
+            "additionalProperties": false,
+            "properties": {
+              "name": {"type": "string"},
+              "start_anchor": {"type": "string"},
+              "end_anchor": {"type": "string"},
+              "role": {"type": "string"},
+              "min_length": {"type": ["integer", "null"], "minimum": 0},
+              "max_length": {"type": ["integer", "null"], "minimum": 0}
+            }
+          }
+        }
+      }
+    },
+    "barcode": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "left_anchor": {"type": ["string", "null"]},
+        "right_anchor": {"type": ["string", "null"]},
+        "barcode_length": {"type": "integer", "minimum": 1},
+        "umi_length": {"type": "integer", "minimum": 0},
+        "offset_from_left": {"type": "integer"},
+        "min_base_quality": {"type": "integer", "minimum": 0},
+        "whitelist_path": {"type": ["string", "null"]},
+        "max_edit_distance": {"type": "integer", "minimum": 0},
+        "min_distance_margin": {"type": "integer", "minimum": 0}
+      }
+    },
+    "thresholds": {"type": "object"},
+    "samples": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["sample_name", "path"],
+        "properties": {"sample_name": {"type": "string"}, "path": {"type": "string"}}
+      }
+    }
+  }
+}

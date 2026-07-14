@@ -1,230 +1,317 @@
-# scfastq-qc
+# AnchorScope
 
-A structure-aware FASTQ QC tool for single-cell long-read libraries.
+`AnchorScope` is a high-performance, anchor-aware Quality Control (QC) and filtering tool designed specifically for single-cell long-read sequencing libraries.
 
-## Features
+Unlike traditional bulk FASTQ QC tools, `AnchorScope` understands the molecular structure of single-cell libraries. It actively searches for expected sequences (like adapters, polyA tails, cell barcodes) to classify each read, providing deep insights into library construction success, structural integrity, and overall sequencing quality.
 
-- Total reads / total bases / mean / median / N50 read length
-- Read length histogram and cumulative curve
-- Base-level quality histogram, read-level Qscore density plot, and length-vs-read-Qscore plot
-- Configurable anchor detection using fixed sequences or regex patterns
-- Anchor order validation and read structure classification
-- Automatic forward / reverse-complement structure classification with reversed-read reporting
-- HTML report with figures and summary tables
-- Optional Rust accelerator for fixed-anchor scans with automatic Python fallback
+## Key Features
 
-## Quick start
+*   **Structure-Aware QC**: Identifies expected motifs (Anchors) using exact match with mismatches or regex patterns.
+*   **Orientation Agnostic**: Automatically checks both forward and reverse-complement strands to determine the true orientation of each read.
+*   **Self-contained HTML Reports**: Generates accessible SVG visualizations without external web dependencies.
+*   **Batch Processing**: Natively supports processing multiple samples concurrently.
+*   **Parallel Acceleration**: Utilizes multi-processing to significantly speed up single-file processing (`--threads`).
+*   **FASTQ Filtering**: Optionally splits reads into `passed.fastq` and `failed.fastq` based on comprehensive QC verdicts.
+*   **Rust Acceleration**: Includes an optional Rust core for substitution-only fixed-anchor searching; reports always identify the backend used.
+*   **Indel-aware Alignment**: Semi-global Levenshtein matching reports substitutions, insertions, deletions, and CIGAR operations.
+*   **Protocol Structure Grammar**: Anchor count, terminal position, distance, orientation, segment, and concatemer-cycle rules.
+*   **Segment-level QC**: Length, Q-score, GC, N-content, observability, and configured-bound conformance between anchors.
+*   **Barcode/UMI Recoverability QC**: Diagnostic-only extraction, quality filtering, whitelist distance, and ambiguity metrics without sequence correction.
+*   **Workflow Interoperability**: MultiQC custom content, gzip FASTQ output, and BAM tag auditing for common single-cell tags and Dorado poly(A).
 
-```bash
-python -m scfastq_qc.cli run \
-  --fastq examples/example.fastq \
-  --config examples/config.json \
-  --outdir out
-```
+---
 
-After the command finishes, inspect:
+## Installation
 
-- `out/report.html` for the interactive summary report
-- `out/summary.json` for machine-readable metrics
-- `out/figures/` for the generated SVG figures
+### Prerequisites
+*   Python 3.10+
+*   (Optional but recommended) Rust toolchain for the high-speed search accelerator.
 
-## Typical workflow
-
-1. Prepare a FASTQ or FASTQ.GZ file.
-2. Define anchor rules and QC thresholds in a JSON config file.
-3. Run the CLI with the FASTQ, config, and an output directory.
-4. Review the HTML report for plots and high-level interpretation.
-5. Parse `summary.json` in downstream automation if needed.
-
-## CLI usage
+### 1. Build the Rust Accelerator (Optional)
+The Rust module accelerates substitution-only fixed-anchor searching. Indel-aware anchors continue to use the Python edit-distance implementation, and every report records the selected backend.
 
 ```bash
-python -m scfastq_qc.cli run --fastq <reads.fastq.gz> --config <config.json> --outdir <outdir>
+cd rust/anchor_engine
+cargo build --release
+```
+Then, set the environment variable to point to the compiled library before running the tool:
+*   **Linux**: `export ANCHORSCOPE_RUST_LIB=$(pwd)/target/release/libanchorscope_rs.so`
+*   **macOS**: `export ANCHORSCOPE_RUST_LIB=$(pwd)/target/release/libanchorscope_rs.dylib`
+*   **Windows**: `$env:ANCHORSCOPE_RUST_LIB = "$PWD\target\release\anchorscope_rs.dll"`
+
+### 2. Install the Python Package
+```bash
+pip install -e .
 ```
 
-Arguments:
+---
 
-- `--fastq`: input FASTQ/FASTQ.GZ file
-- `--config`: JSON config file
-- `--outdir`: output directory; created automatically if it does not exist
+## Core Concepts
 
-## Config format
+Understanding how `AnchorScope` processes reads is key to configuring it correctly.
 
-The config file contains four top-level sections:
+### 1. Anchors
+An **Anchor** is a known sequence motif expected to be present in your library (e.g., a 5' adapter, a 3' adapter, or a polyA tail).
+*   **Fixed Anchors**: Defined by a specific DNA sequence and a maximum number of allowed mismatches.
+*   **Regex Anchors**: Defined by a regular expression (e.g., `A{8,}` for a polyA tail).
+
+**Anchor Matching Principles:**
+1.  **Fuzzy Searching**: `max_mismatches` selects the fast, fixed-length Hamming matcher and permits substitutions only. Setting `max_edits` selects semi-global Levenshtein alignment and permits substitutions, insertions, and deletions. The latter also reports operation counts and a CIGAR string.
+2.  **Rust Acceleration**: When compiled, the Rust core executes the fixed-length Hamming matcher. Indel-aware `max_edits` anchors use the Python Levenshtein implementation, so mixed configurations are reported as a hybrid backend.
+3.  **Best Hit Selection**: If a motif appears multiple times in one read, the tool selects the hit with the lowest edit burden and then the earliest coordinates.
+4.  **Strand Agnostic**: Because single-cell long-read libraries often sequence both the forward and reverse-complement strands randomly, the anchor matching runs twice for every read: once on the raw sequence, and once on its reverse-complement. The strand that yields the most complete and correctly ordered set of anchors is determined to be the true biological orientation.
+
+### 2. Structure Classification
+`AnchorScope` scans every read (and its reverse complement) for all defined anchors. Based on what it finds, it assigns a **Structure Label**:
+*   `full_structure`: All expected anchors were found.
+*   `missing_5p_anchor` / `missing_3p_anchor`: A required terminal anchor was not found.
+*   `anchor_order_invalid`: Anchors were found in an order inconsistent with the configured grammar.
+*   `structure_rule_violation`: Order was present, but a count, terminal-position, or distance rule failed.
+*   `concatemer_candidate`: At least the configured number of complete anchor cycles was detected.
+*   `no_anchor_detected`: None of the anchors were found.
+
+### 3. QC Buckets
+Beyond just finding anchors, the tool evaluates read length, quality scores, truncation, and valid base content to assign each read into a mutually exclusive **QC Bucket**:
+*   `pass`: The read meets all quality criteria, has valid anchor order, and is not severely truncated.
+*   `too_short` / `low_read_q`: Fails length or mean quality score thresholds.
+*   `order_invalid` / `structure_rule_violation`: Anchors conflict with order or protocol rules.
+*   `no_anchor`: Fails to detect any anchors.
+*   `five_prime_truncated` / `three_prime_truncated`: Terminal anchors are too far from their expected read ends.
+*   `high_n` / `invalid_bases`: The read contains too many `N` bases or non-standard characters.
+
+---
+
+## Configuration (`config.json`)
+
+`AnchorScope` is heavily driven by a JSON configuration file. Here is a detailed breakdown of all parameters:
 
 ```json
 {
-  "sample_name": "example_sample",
+  "sample_name": "My_Experiment",
+  "qscore_method": "conservative",
+  "export_non_full_structure_fastq": false,
+
   "anchors": [
     {
       "name": "adapter_5p",
       "type": "fixed",
-      "sequence": "ACGTACGT",
-      "max_mismatches": 1
+      "sequence": "CGACATGGCTACGATCCGACTT",
+      "max_edits": 2,
+      "search_region": "5p",
+      "search_window_bp": 150
     },
     {
-      "name": "polyT",
+      "name": "polyA",
       "type": "regex",
-      "pattern": "T{6,}"
+      "pattern": "A{8,}"
     }
   ],
+
   "structure": {
-    "expected_order": ["adapter_5p", "polyT"]
+    "expected_order": ["adapter_5p", "polyA"],
+    "expected_orientation": "either",
+    "concatemer_min_cycles": 2,
+    "split_concatemers": true,
+    "anchor_rules": {
+      "adapter_5p": {"terminal": "5p", "max_terminal_offset": 0.15},
+      "polyA": {"terminal": "3p", "max_terminal_offset": 0.15}
+    },
+    "segments": [
+      {"name": "transcript", "start_anchor": "adapter_5p", "end_anchor": "polyA", "role": "insert"}
+    ]
   },
+
+  "barcode": {
+    "enabled": false,
+    "left_anchor": "adapter_5p",
+    "right_anchor": "polyA",
+    "barcode_length": 16,
+    "umi_length": 12,
+    "min_base_quality": 15,
+    "whitelist_path": "3M-february-2018.txt",
+    "max_edit_distance": 2,
+    "min_distance_margin": 1
+  },
+
   "thresholds": {
-    "long_read_min_bp": 20,
-    "long_read_min_q": 20,
-    "heatmap_max_reads": 100
-  }
+    "long_read_min_bp": 500,
+    "long_read_min_q": 10.0,
+    "terminal_anchor_max_offset": 0.15,
+    "high_n_fraction": 0.1,
+
+    "warn_long_high_quality_ratio": 0.7,
+    "fail_long_high_quality_ratio": 0.5,
+    "warn_correct_anchor_order_ratio": 0.7,
+    "fail_correct_anchor_order_ratio": 0.5,
+    "warn_no_anchor_ratio": 0.2,
+    "fail_no_anchor_ratio": 0.35,
+    "warn_reversed_read_ratio": 0.3,
+    "fail_reversed_read_ratio": 0.5,
+    "warn_high_n_ratio": 0.1,
+    "fail_high_n_ratio": 0.2
+  },
+
+  "samples": [
+    { "sample_name": "Sample_A", "path": "data/sampleA.fastq.gz" },
+    { "sample_name": "Sample_B", "path": "data/sampleB.fastq.gz" }
+  ]
 }
 ```
 
-### Field reference
+### Parameter Details
 
-#### `sample_name`
+#### Global Settings
+*   `sample_name` (string): Default name for the sample (used in reports).
+*   `qscore_method` (string): Method for calculating mean read Q-score. `"conservative"` (default, converts to probabilities first) or `"arithmetic_mean"`.
+*   `export_non_full_structure_fastq` (bool): If true, creates a separate FASTQ file for *each* structure class (e.g., `missing_polyA.fastq`) containing the reads that fell into that class.
 
-A free-form label written into the report and summary JSON. Use a value that identifies the library or sequencing run.
+#### `anchors` (List of Objects)
+Defines the motifs to search for.
+*   `name` (string): Unique identifier for the anchor.
+*   `type` (string): `"fixed"` or `"regex"`.
+*   `sequence` (string): Required if type is `"fixed"`.
+*   `max_mismatches` (int): Substitution-only threshold for the Hamming matcher; omit or leave at zero when `max_edits` is used.
+*   `max_edits` (int): Optional indel-aware alternative to `max_mismatches`; uses Levenshtein distance.
+*   `search_region` / `search_window_bp`: Optionally restrict matching to a 5-prime or 3-prime window.
+*   `pattern` (string): Required if type is `"regex"`.
 
-#### `anchors`
-
-Each anchor definition describes one motif that should be detected in reads.
-
-- `name`: required label used in summaries, heatmaps, and structure classification.
-- `type`: required anchor type. Supported values are `fixed` and `regex`.
-- `sequence`: required when `type` is `fixed`. The exact motif to scan for.
-- `pattern`: required when `type` is `regex`. Any Python regular expression accepted by `re.compile`.
-- `max_mismatches`: optional for `fixed` anchors. Defaults to `0` and must be a non-negative integer.
-
-#### `structure.expected_order`
-
-A left-to-right list of anchor names. Reads are classified against this expected order, so keep the names aligned with the `anchors` section.
+#### `structure`
+*   `expected_order` (List of strings): The order in which the defined anchors should appear from 5' to 3' on the read.
+*   `expected_orientation`: `"either"`, `"forward"`, or `"reverse"`. Bidirectional protocols should use `"either"`.
+*   `anchor_rules`: Per-anchor count, terminal-position, and inter-anchor distance constraints.
+*   `segments`: Named molecular regions bounded by two anchors for segment-level QC.
+*   `split_concatemers`: Export each complete repeated structure cycle as an oriented subread.
 
 #### `thresholds`
+Controls the logic for QC Buckets and the final pass/warn/fail status of the entire run.
+*   `long_read_min_bp`: Minimum length for a read to be considered "long/valid".
+*   `long_read_min_q`: Minimum mean Q-score for a read to be considered "high quality".
+*   `terminal_anchor_max_offset`: Used to detect truncation. If the first/last expected anchors are found, but their distance from the end of the read exceeds this fraction (e.g., `0.15` = 15% of read length), the read is flagged as truncated.
+*   `high_n_fraction`: Maximum allowed fraction of 'N' bases in a read.
+*   `warn_*` / `fail_*`: Thresholds for the overall sample HTML report verdicts. For example, if the ratio of reads with no anchors exceeds `fail_no_anchor_ratio`, the report will flag the library construction as "Failed".
 
-Threshold settings control how the QC summary is interpreted.
+#### `samples` (Optional)
+A list of sample dictionaries (`sample_name`, `path`). If provided, you can run batch jobs entirely driven by the config file without specifying paths on the command line.
 
-- `long_read_min_bp`: minimum read length used in the long/high-quality ratio. Default: `1000`.
-- `long_read_min_q`: minimum read Qscore used in the long/high-quality ratio. Default: `10.0`.
-- `heatmap_max_reads`: maximum reads rendered in the heatmap. Default: `200`.
+---
 
-### Quality metric definition
+## Usage & CLI Reference
 
-Quality strings are decoded as standard FASTQ `Phred+33`.
+The CLI has two main subcommands: `run` (for single files or config-driven batches) and `batch` (for directory/file-list inputs).
 
-Per-read quality statistics use read-level Qscore rather than the arithmetic mean of per-base Phred values:
+### Global Options
+*   `--log-file <path>`: Write logs to a file.
+*   `--log-level <DEBUG|INFO|WARNING|ERROR|CRITICAL>`: Default is `INFO`.
 
-1. Convert each base quality to error probability with `10^(-Q/10)`.
-2. Average the per-base error probabilities across the read.
-3. Convert the mean error rate back to a read Qscore with `-10 * log10(mean_error_rate)`.
-
-This definition is typically more conservative than averaging per-base Phred scores directly, so existing `long_read_min_q` thresholds may need to be re-tuned after upgrading.
-
-See `examples/config.json` for a minimal working example.
-
-## Config examples
-
-### Example 1: Adapter + polyT
-
-This is the simplest structure model: a fixed adapter followed by a polyT tail.
-
-```json
-{
-  "sample_name": "adapter_polyT_demo",
-  "anchors": [
-    {
-      "name": "adapter_5p",
-      "type": "fixed",
-      "sequence": "ACGTACGT",
-      "max_mismatches": 1
-    },
-    {
-      "name": "polyT",
-      "type": "regex",
-      "pattern": "T{8,}"
-    }
-  ],
-  "structure": {
-    "expected_order": ["adapter_5p", "polyT"]
-  },
-  "thresholds": {
-    "long_read_min_bp": 1000,
-    "long_read_min_q": 10.0,
-    "heatmap_max_reads": 200
-  }
-}
-```
-
-### Example 2: Adapter + TSO + polyT
-
-For many single-cell protocols, you may want to explicitly track a template-switch oligo (TSO) in addition to the 5' adapter and polyT region.
-
-```json
-{
-  "sample_name": "adapter_tso_polyT_demo",
-  "anchors": [
-    {
-      "name": "adapter_5p",
-      "type": "fixed",
-      "sequence": "CTACACGACGCTCTTCCGATCT",
-      "max_mismatches": 1
-    },
-    {
-      "name": "tso",
-      "type": "fixed",
-      "sequence": "AAGCAGTGGTATCAACGCAGAGTACATGGG",
-      "max_mismatches": 2
-    },
-    {
-      "name": "polyT",
-      "type": "regex",
-      "pattern": "T{10,}"
-    }
-  ],
-  "structure": {
-    "expected_order": ["adapter_5p", "tso", "polyT"]
-  },
-  "thresholds": {
-    "long_read_min_bp": 1500,
-    "long_read_min_q": 12.0,
-    "heatmap_max_reads": 300
-  }
-}
-```
-
-### Tips for choosing anchors
-
-- Use `fixed` anchors for known constant sequences such as adapters, barcodes, or TSO motifs.
-- Use `regex` anchors for variable-length motifs such as polyT or polyA stretches.
-- Start with `max_mismatches: 0` for fixed anchors, then relax only if real data shows expected sequencing noise.
-- Keep `expected_order` short and biologically meaningful; the order is used for structure classification, not exhaustive annotation.
-
-## Output summary
-
-The report currently includes:
-
-- total reads, total bases, mean/median read length, and N50
-- read length histogram and cumulative distribution
-- base-level quality histogram, per-read Qscore density plot, and length-vs-read-Qscore scatter plot
-- anchor detection ratios and structure classification counts, including forward vs reversed orientation
-- anchor occupancy heatmap across normalized read positions
-
-## Build Rust accelerator
-
-The Rust module is an optional accelerator for fixed-anchor scans. If it is unavailable, incompatible, or fails to build/load, the package automatically falls back to the pure-Python implementation.
-
-If `cargo` is available, the Python package attempts to build the Rust hotspot module automatically on first use, so most users do not need to run a separate setup step.
-
-You can still build it manually if you want:
+### Subcommand: `run`
+Used for processing a single FASTQ file, or triggering a batch if the `--config` file contains a `"samples"` list.
 
 ```bash
-cargo build --release --manifest-path rust/anchor_engine/Cargo.toml
+anchorscope run \
+  --fastq input.fastq.gz \
+  --config config.json \
+  --outdir ./results \
+  --threads 8 \
+  --output-passed-fastq \
+  --output-failed-fastq \
+  --gzip-output \
+  --export-csv
 ```
 
-If the shared library is present under the Cargo `target/release/` directory, the Python code will load it automatically and use Rust for fixed-anchor scans; otherwise it falls back to the pure-Python implementation.
+**Parameters for `run`:**
+*   `--fastq`: Path to input FASTQ/FASTQ.GZ. *Required unless your config file has a `samples` list.*
+*   `--config`: Path to `config.json`.
+*   `--outdir`: Where to save the output files.
+*   `--threads N`: Number of CPU processes to use for parallelizing the anchor search within the single FASTQ file. Dramatically speeds up processing (Default: 1).
+*   `--output-passed-fastq`: Export reads that landed in the `pass` QC Bucket to `passed.fastq`.
+*   `--output-failed-fastq`: Export reads that landed in any non-pass QC Bucket to `failed.fastq`.
+*   `--export-csv`: Export detailed per-read and per-anchor statistics to CSV files.
+*   `--gzip-output`: Compress all emitted FASTQ files as `.fastq.gz`.
 
-## Troubleshooting
+### Subcommand: `audit-bam`
 
-- **Config load fails on another machine**: ensure the JSON file is UTF-8 encoded.
-- **Anchor preparation raises a validation error**: verify that `fixed` anchors include `sequence`, `regex` anchors include `pattern`, and `max_mismatches` is non-negative.
-- **Structure calls look wrong**: make sure every name in `structure.expected_order` exactly matches an anchor `name`.
-- **Rust accelerator is not used**: this is not fatal. Check that `cargo` is installed and a compatible Rust toolchain/linker is available if you want the optional speedup.
+Audit tags generated by an external barcode/UMI workflow without rerunning correction:
+
+```bash
+anchorscope audit-bam --bam tagged.bam --outdir tag_audit --sample-name sample_A
+```
+
+The command reads `CR`, `CB`, `CY`, `UR`, `UB`, `UY`, and Dorado `pt` tags. It writes `tag_audit_summary.json` and `anchorscope_tag_audit_mqc.json`. Text SAM works without optional dependencies; binary BAM support is installed with `pip install -e ".[bam]"`.
+
+### Subcommand: `batch`
+Used for processing multiple FASTQ files by scanning a directory or reading a list of files.
+
+```bash
+# Scan a directory for FASTQ files
+anchorscope batch \
+  --input /path/to/data_dir \
+  --pattern "*.fastq.gz" \
+  --config config.json \
+  --outdir ./batch_results \
+  --parallel 4 \
+  --output-passed-fastq
+```
+
+**Parameters for `batch`:**
+*   `--input`: Path to a directory containing FASTQ files, or a text file containing one FASTQ path per line. *Required unless config has a `samples` list.*
+*   `--pattern`: If `--input` is a directory, glob pattern to match files (Default: `*.fastq*`).
+*   `--config`: Path to `config.json`.
+*   `--outdir`: Base output directory. A subdirectory will be created for each sample.
+*   `--parallel N`: Number of *samples* to process concurrently (Sample-level parallelism).
+*   `--continue-on-error`: If one sample fails, log the error and continue with the rest.
+*   `--output-passed-fastq` / `--output-failed-fastq`: Export filtered FASTQs inside each sample's subdirectory.
+*   `--export-csv`: Export CSVs inside each sample's subdirectory.
+
+> **Parallelism Note:**
+> *   Use `batch --parallel N` to process *N different samples* at the same time.
+> *   Use `run --threads N` to process *1 sample* using N CPU cores.
+
+---
+
+## Output Files
+
+Depending on the mode and flags used, `AnchorScope` generates the following inside the `--outdir`:
+
+### Standard Outputs (Always Generated)
+*   **`report.html`**: A highly visual, interactive HTML report containing length distributions, Q-score plots, anchor detection heatmaps, and overall sample verdicts. It is completely self-contained (no internet required to view).
+*   **`summary.json`**: A machine-readable JSON file containing all the raw metrics and calculated ratios presented in the HTML report.
+*   **`anchorscope_mqc.json`**: MultiQC custom-content general statistics, emitted automatically.
+
+### Filtered FASTQs (When requested)
+*   **`passed.fastq`**: Generated if `--output-passed-fastq` is provided. Contains reads deemed "good" by the QC bucket logic.
+*   **`failed.fastq`**: Generated if `--output-failed-fastq` is provided. Contains the reads that failed QC.
+*   **`<structure_label>.fastq`**: Generated if `export_non_full_structure_fastq` is `true` in the config. Groups reads strictly by missing anchors or unexpected order.
+
+### CSV Exports (When `--export-csv` is requested)
+*   **`summary.csv`**: Flattened version of the high-level metrics.
+*   **`structure_classification.csv`**: Counts and ratios of reads falling into each structure category.
+*   **`read_details.csv`**: A large file containing 1 row per read, detailing its length, q-score, offsets, structure, and QC bucket.
+*   **`anchor_hits.csv`**: One row per anchor hit with coordinates, total edits, substitutions, insertions, deletions, CIGAR, and matched sequence.
+
+### Batch Outputs (Only in `batch` mode)
+In addition to a subdirectory for each sample containing the files above, batch mode generates at the root of `--outdir`:
+*   **`batch_report.html`**: A high-level summary table comparing key metrics (Total reads, High-quality %, Valid order %, Overall status) across all processed samples.
+*   **`batch_summary.json`**: JSON representation of the batch results.
+
+---
+
+## Reproducibility and publication validation
+
+AnchorScope uses deterministic algorithms throughout the QC path. The synthetic truth benchmark fixes its random seed and records the Git commit, Python version, platform, matcher backend, confusion matrix, accuracy, and throughput.
+
+```bash
+python -B -m unittest discover -s tests -v
+python -B benchmarks/benchmark_synthetic.py \
+  --reads-per-class 100 \
+  --seed 20260710 \
+  --output benchmarks/results/synthetic_benchmark.json
+python -B benchmarks/validate_comprehensive_synthetic.py \
+  --output-dir validation/synthetic_comprehensive \
+  --replicates 5 \
+  --seed 20260713 \
+  --threads 2
+```
+
+Formal metric definitions, algorithm details, limitations, benchmarking guidance, and validation design are documented in `docs/METHODS.md`, `docs/BENCHMARKING.md`, and `docs/SYNTHETIC_VALIDATION.md`. Configuration keys are machine-described by `src/anchorscope/config.schema.json`.
+
+AnchorScope is released under the MIT License. Citation metadata are provided in `CITATION.cff`.

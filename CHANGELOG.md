@@ -13,4 +13,4 @@
 
 ## 0.1.0
 
-- Initial anchor-aware FASTQ QC, filtering, batch processing, HTML reporting, and optional Rust Hamming matcher.
+- Initial anchor-aware FASTQ QC, filtering, batch processing, HTML reporting, and fixed-length Hamming matcher.

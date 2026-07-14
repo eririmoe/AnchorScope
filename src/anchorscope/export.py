@@ -24,7 +24,7 @@ def export_summary_to_csv(summary: dict[str, Any], output_path: Path) -> None:
         writer.writerow(["5' Truncation Ratio", f"{summary.get('five_prime_truncation_ratio', 0):.4f}"])
         writer.writerow(["3' Truncation Ratio", f"{summary.get('three_prime_truncation_ratio', 0):.4f}"])
         writer.writerow(["High-N Read Ratio", f"{summary.get('high_n_read_ratio', 0):.4f}"])
-        writer.writerow(["Matcher Backend", summary.get("matcher_backend", summary.get("rust_accelerator", {})).get("mode", "unknown")])
+        writer.writerow(["Matcher Backend", summary.get("matcher_backend", {}).get("mode", "unknown")])
 
         writer.writerow([])
         writer.writerow(["Anchor Detection Ratios"])

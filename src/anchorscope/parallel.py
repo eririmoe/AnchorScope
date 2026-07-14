@@ -6,9 +6,6 @@ filtering, report generation) in the main process.
 
 Design notes:
 - Uses ``multiprocessing.Pool.imap`` to preserve original FASTQ read order.
-- Each worker process lazily initialises its own Rust anchor engine (if
-  available) via the existing ``get_rust_anchor_engine()`` singleton, so no
-  cross-process handle sharing is needed.
 - ``PreparedAnchor`` objects contain ``re.Pattern`` and simple dataclasses,
   both of which are pickle-safe.
 """
@@ -464,7 +461,6 @@ def run_qc_parallel(
         "qc_bucket_counts": qc_bucket_counts_dict,
         "qc_bucket_ratios": {bucket: (count / total_reads) if total_reads else 0.0 for bucket, count in qc_bucket_counts_dict.items()},
         "matcher_backend": get_matcher_status(config.anchors),
-        "rust_accelerator": get_matcher_status(config.anchors),
         "passed_reads_exported": passed_reads_exported if output_passed_fastq else None,
         "failed_reads_exported": failed_reads_exported if output_failed_fastq else None,
         "concatemer_parent_reads": concatemer_parent_reads,

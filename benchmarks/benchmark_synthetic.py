@@ -16,7 +16,6 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from anchorscope.anchors import (
     find_anchor_hits,
-    get_rust_status,
     levenshtein_distance,
     prepare_anchors,
     reverse_complement,
@@ -176,7 +175,6 @@ def run_benchmark(reads_per_class: int = 100, seed: int = 20260710) -> dict[str,
         "git_dirty": git_dirty,
         "python": platform.python_version(),
         "platform": platform.platform(),
-        "rust_backend": get_rust_status(),
         "indel_aware": edit_metrics,
         "legacy_hamming": hamming_metrics,
     }

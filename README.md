@@ -12,7 +12,6 @@ Unlike traditional bulk FASTQ QC tools, `AnchorScope` understands the molecular 
 *   **Batch Processing**: Natively supports processing multiple samples concurrently.
 *   **Parallel Acceleration**: Utilizes multi-processing to significantly speed up single-file processing (`--threads`).
 *   **FASTQ Filtering**: Optionally splits reads into `passed.fastq` and `failed.fastq` based on comprehensive QC verdicts.
-*   **Rust Acceleration**: Includes an optional Rust core for substitution-only fixed-anchor searching; reports always identify the backend used.
 *   **Indel-aware Alignment**: Semi-global Levenshtein matching reports substitutions, insertions, deletions, and CIGAR operations.
 *   **Protocol Structure Grammar**: Anchor count, terminal position, distance, orientation, segment, and concatemer-cycle rules.
 *   **Segment-level QC**: Length, Q-score, GC, N-content, observability, and configured-bound conformance between anchors.
@@ -24,24 +23,69 @@ Unlike traditional bulk FASTQ QC tools, `AnchorScope` understands the molecular 
 ## Installation
 
 ### Prerequisites
+
 *   Python 3.10+
-*   (Optional but recommended) Rust toolchain for the high-speed search accelerator.
+*   Git
 
-### 1. Build the Rust Accelerator (Optional)
-The Rust module accelerates substitution-only fixed-anchor searching. Indel-aware anchors continue to use the Python edit-distance implementation, and every report records the selected backend.
+### 1. Clone the repository
 
 ```bash
-cd rust/anchor_engine
-cargo build --release
+git clone https://github.com/eririmoe/AnchorScope.git
+cd AnchorScope
 ```
-Then, set the environment variable to point to the compiled library before running the tool:
-*   **Linux**: `export ANCHORSCOPE_RUST_LIB=$(pwd)/target/release/libanchorscope_rs.so`
-*   **macOS**: `export ANCHORSCOPE_RUST_LIB=$(pwd)/target/release/libanchorscope_rs.dylib`
-*   **Windows**: `$env:ANCHORSCOPE_RUST_LIB = "$PWD\target\release\anchorscope_rs.dll"`
 
-### 2. Install the Python Package
+### 2. Create and activate a virtual environment
+
+Using a dedicated environment avoids conflicts with other Python tools.
+
+Linux or macOS:
+
 ```bash
-pip install -e .
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+```
+
+Windows PowerShell:
+
+```powershell
+py -3.10 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+```
+
+### 3. Install AnchorScope
+
+For normal use, install the checked-out source tree into the active environment:
+
+```bash
+python -m pip install .
+```
+
+For development, use an editable installation so that local code changes take effect immediately:
+
+```bash
+python -m pip install -e .
+```
+
+To enable optional BAM tag auditing, install the `bam` extra:
+
+```bash
+python -m pip install ".[bam]"
+```
+
+### 4. Verify the installation
+
+```bash
+anchorscope --help
+python -c "import anchorscope; print('AnchorScope is installed')"
+```
+
+To update a cloned copy later:
+
+```bash
+git pull
+python -m pip install .
 ```
 
 ---
@@ -57,9 +101,8 @@ An **Anchor** is a known sequence motif expected to be present in your library (
 
 **Anchor Matching Principles:**
 1.  **Fuzzy Searching**: `max_mismatches` selects the fast, fixed-length Hamming matcher and permits substitutions only. Setting `max_edits` selects semi-global Levenshtein alignment and permits substitutions, insertions, and deletions. The latter also reports operation counts and a CIGAR string.
-2.  **Rust Acceleration**: When compiled, the Rust core executes the fixed-length Hamming matcher. Indel-aware `max_edits` anchors use the Python Levenshtein implementation, so mixed configurations are reported as a hybrid backend.
-3.  **Best Hit Selection**: If a motif appears multiple times in one read, the tool selects the hit with the lowest edit burden and then the earliest coordinates.
-4.  **Strand Agnostic**: Because single-cell long-read libraries often sequence both the forward and reverse-complement strands randomly, the anchor matching runs twice for every read: once on the raw sequence, and once on its reverse-complement. The strand that yields the most complete and correctly ordered set of anchors is determined to be the true biological orientation.
+2.  **Best Hit Selection**: If a motif appears multiple times in one read, the tool selects the hit with the lowest edit burden and then the earliest coordinates.
+3.  **Strand Agnostic**: Because single-cell long-read libraries often sequence both the forward and reverse-complement strands randomly, the anchor matching runs twice for every read: once on the raw sequence, and once on its reverse-complement. The strand that yields the most complete and correctly ordered set of anchors is determined to be the true biological orientation.
 
 ### 2. Structure Classification
 `AnchorScope` scans every read (and its reverse complement) for all defined anchors. Based on what it finds, it assigns a **Structure Label**:

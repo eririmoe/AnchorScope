@@ -16,7 +16,7 @@ The optional arithmetic method reports the mean of base-level Phred scores. Leng
 
 Fixed anchors have two explicit modes.
 
-- `max_mismatches`: substitution-only Hamming distance, preserving the accelerated legacy implementation.
+- `max_mismatches`: substitution-only fixed-length Hamming distance.
 - `max_edits`: semi-global Levenshtein alignment of a motif against any substring of the configured search region. Dynamic-programming row zero is initialized to zero to permit a free read prefix. Substitution, insertion, and deletion have unit cost.
 
 Qualifying endpoints are traced back to obtain coordinates, operation counts, and compact CIGAR. Overlapping endpoints representing one occurrence are reduced to the lowest-edit, closest-length alignment; distinct non-overlapping occurrences are retained. `search_region` and `search_window_bp` can constrain an anchor to a 5-prime or 3-prime window.
@@ -60,7 +60,7 @@ The synthetic benchmark uses seeded random payloads but rejects any payload cont
 ## Limitations
 
 - Sequence-only anchor and poly(A) calls depend on basecalling accuracy.
-- The pure-Python edit aligner is slower than the Rust Hamming path; benchmarks must report mode and backend.
+- Edit-distance matching is generally slower than fixed-length Hamming matching; benchmarks should report the selected mode.
 - Barcode recoverability is not validated barcode correction or cell calling.
 - Fused-read splitting emits only complete configured cycles and does not generate consensus.
 - BAM auditing requires optional `pysam` and evaluates existing tags rather than reproducing the upstream algorithm.

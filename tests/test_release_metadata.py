@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
-import tomllib
 import unittest
 from pathlib import Path
 
@@ -14,8 +14,16 @@ import anchorscope
 
 class ReleaseMetadataTests(unittest.TestCase):
     def test_version_is_consistent(self):
-        project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-        version = project["project"]["version"]
+        pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        project_section = re.search(
+            r"(?ms)^\[project\]\s*(.*?)(?=^\[|\Z)", pyproject
+        )
+        self.assertIsNotNone(project_section, "missing [project] section")
+        version_match = re.search(
+            r'(?m)^version\s*=\s*"([^"]+)"\s*$', project_section.group(1)
+        )
+        self.assertIsNotNone(version_match, "missing project version")
+        version = version_match.group(1)
         self.assertEqual(version, anchorscope.__version__)
         self.assertIn(f"version: {version}", (ROOT / "CITATION.cff").read_text(encoding="utf-8"))
 

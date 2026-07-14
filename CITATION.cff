@@ -1,9 +1,0 @@
-cff-version: 1.2.0
-message: "If you use AnchorScope, please cite the software and the associated methods paper."
-title: "AnchorScope: anchor-aware quality control for single-cell long-read libraries"
-type: software
-version: 0.2.0
-date-released: 2026-07-10
-authors:
-  - name: "AnchorScope contributors"
-license: MIT
